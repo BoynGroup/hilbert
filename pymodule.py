@@ -719,7 +719,7 @@ def run_mcpdft(name, **kwargs):
         'blyp' : ['gga_x_b88', 'gga_c_lyp'],
         'bop' : ['gga_x_b88', 'gga_c_op_b88'],
         'pbe' : ['gga_x_pbe', 'gga_c_pbe'],
-        'revpbe' : ['gga_x_pbe_r', 'gga_c_pbe']
+        'revpbe': ['gga_x_pbe_r', 'gga_c_pbe'],
     }
     functional = psi4.core.get_option('HILBERT','MCPDFT_FUNCTIONAL').lower()
 
@@ -811,6 +811,7 @@ def run_mcpdft(name, **kwargs):
     jk = psi4.core.JK.build(new_wfn.get_basisset("ORBITAL"),
                            aux=new_wfn.get_basisset("DF_BASIS_SCF"))
 
+    jk.set_memory(int(5e8)) # 4GB of memory
     jk.set_do_K(False)
     jk.set_do_wK(False)
     jk.initialize()
@@ -840,8 +841,10 @@ def run_mcpdft(name, **kwargs):
     Jb.transform(new_wfn.Cb())
 
     coulomb_energy = Da.vector_dot(Ja)
+    coulomb_energy += Da.vector_dot(Jb)
+    coulomb_energy += Db.vector_dot(Ja)
     coulomb_energy += Db.vector_dot(Jb)
-
+    coulomb_energy *= 0.5
     # xc contribution to the energy
 
     # density in real space

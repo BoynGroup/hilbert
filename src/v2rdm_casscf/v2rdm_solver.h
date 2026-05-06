@@ -167,6 +167,9 @@ class v2RDMSolver: public Wavefunction{
     /// initialize things common to molecular / hubbard / external hamiltonians
     void initialize_common_elements();
 
+    /// max number of orbital rotations
+    int scf_maxiter_;
+
     /// set constraints
     void set_constraints();
 

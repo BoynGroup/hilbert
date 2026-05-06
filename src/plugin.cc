@@ -115,6 +115,9 @@ int read_options(std::string name, Options& options)
 
         /*- SUBSECTION ORBITAL OPTIMIZATION -*/
 
+        options.add_bool("SAVE_SCF", false);
+        /*- Write a MOLDEN file for the orbitals at each CASSCF iteration. -*/
+
         options.add_bool("MOLDEN_WRITE", false);
         /*- Do write a MOLDEN file for guess orbitals?  If so, the filename will
         end in .guess.molden, and the prefix is determined by 
@@ -155,11 +158,15 @@ int read_options(std::string name, Options& options)
         /*- maximum number of iterations for orbital optimization -*/
         options.add_int("ORBOPT_MAXITER",10);
 
+        /*- maximum number of cycles for CASSCF -*/
+        options.add_int("SCF_MAXITER",75);
+
         /*- Do write a ORBOPT output file?  If so, the filename will end in
         .molden, and the prefix is determined by |globals__writer_file_label|
         (if set), or else by the name of the output file plus the name of
         the current molecule. -*/
         options.add_bool("ORBOPT_WRITE", false);
+
 
         /*- SUBSECTION pp2RDM -*/
 
