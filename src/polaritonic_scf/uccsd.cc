@@ -478,7 +478,7 @@ std::shared_ptr<Matrix> PolaritonicUCCSD::hubbard_hartree_fock() {
 void PolaritonicUCCSD::initialize_with_molecular_hamiltonian() {
 
     // ensure scf_type df
-    if ( options_.get_str("SCF_TYPE") != "DF" && options_.get_str("SCF_TYPE") != "CD" ) {
+    if ( (options_.get_str("SCF_TYPE") != "DF" && options_.get_str("SCF_TYPE") != "DISK_DF" && options_.get_str("SCF_TYPE") != "MEM_DF") && options_.get_str("SCF_TYPE") != "CD" ) {
         throw PsiException("polaritonic uhf only works with scf_type df for now",__FILE__,__LINE__);
     }
 
@@ -504,7 +504,7 @@ void PolaritonicUCCSD::initialize_with_molecular_hamiltonian() {
 
     // memory requirements:
 
-    if ( options_.get_str("SCF_TYPE") == "DF" ) {
+    if ( (options_.get_str("SCF_TYPE") == "DF" || options_.get_str("SCF_TYPE") == "DISK_DF" || options_.get_str("SCF_TYPE") == "MEM_DF") ) {
         // get auxiliary basis:
         std::shared_ptr<BasisSet> auxiliary = reference_wavefunction_->get_basisset("DF_BASIS_CC");
 
@@ -718,7 +718,7 @@ void PolaritonicUCCSD::initialize_with_molecular_hamiltonian() {
 // write three-index integrals to disk (file PSIF_DCC_QSO)
 void PolaritonicUCCSD::write_three_index_ints() {
 
-    if ( options_.get_str("SCF_TYPE") == "DF" ) {
+    if ( (options_.get_str("SCF_TYPE") == "DF" || options_.get_str("SCF_TYPE") == "DISK_DF" || options_.get_str("SCF_TYPE") == "MEM_DF") ) {
 
         // get primary basis:
         std::shared_ptr<BasisSet> primary = reference_wavefunction_->get_basisset("ORBITAL");

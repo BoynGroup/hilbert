@@ -30,15 +30,16 @@ __version__ = '0.1'
 __author__  = 'A. Eugene DePrince III and the DePrince group'
 
 # Load Python modules
-from .pymodule import *
+from .pymodule import *  # noqa: F401,F403
 
 # Load C++ plugin
-from .hilbert import *
+from .hilbert import *  # noqa: F401,F403
 
 # Load C++ plugin
 import os
 import psi4
 plugdir = os.path.split(os.path.abspath(__file__))[0]
 sofile = plugdir + '/' + os.path.split(plugdir)[1] + '.so'
+if not os.path.exists(sofile):
+    sofile = os.path.join(plugdir, 'hilbert.so')
 psi4.core.plugin_load(sofile)
-

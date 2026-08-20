@@ -29,8 +29,11 @@
 #include "psi4/libmints/basisset.h"
 #include "psi4/libscf_solver/hf.h"
 
-// real_space_density 
+// real_space_density
 #include "real_space_density.h"
+
+#include <cmath>
+#include <vector>
 
 // blas
 #include <misc/blas.h>
@@ -573,148 +576,248 @@ void RealSpaceDensity::BuildExchangeCorrelationHole(size_t p) {
 
 // build pi. note that there is a low-memory version of this
 // function in edeprince3/real_space_density.git, should we ever need it
-void RealSpaceDensity::BuildPiFast(std::vector<tpdm> D2ab) {
+void RealSpaceDensity::BuildPiFast(const std::vector<tpdm> & D2ab) {
 
     outfile->Printf("\n");
     outfile->Printf("    ==> Build Pi ...");
 
     pi_ = (std::shared_ptr<Vector>)(new Vector(phi_points_));
 
-    double * pi_p = pi_->pointer();
+    double * pi_p  = pi_->pointer();
 
-    for (int p = 0; p < phi_points_; p++) {
+    // By default only the on-top pair density VALUE pi(r) is built. The
+    // "translated" MC-PDFT functionals (run_mcpdft in pymodule.py) build the
+    // translated density gradients from grad(rho) and zeta, NOT from grad(pi),
+    // so grad(pi) is dead work (~90% of this routine: 12 of every 16 phi
+    // products per TPDM element). The gradient is only needed by FULLY-
+    // translated (ft) functionals; enable it with set_pi_gradient(true).
 
-        double dum = 0.0;
+    // The dense active-active block (~nact^4 elements, the bulk of the work for
+    // a large active space) is evaluated as a BLAS-3 GEMM:
+    //     pi_aa(p) = sum_{(ij),(kl)} B[p,(ij)] D2act[(ij),(kl)] B[p,(kl)]
+    // with B[p,(ij)] = phi_i(p) phi_j(p) over active orbitals. The remaining
+    // (core-core, core-active) elements are kept in a scalar list. This only
+    // applies to the value-only path; the gradient (ft) path stays scalar, and
+    // we fall back to fully-scalar if the active-orbital list is unknown.
+    const int  nact     = (int)active_full_indices_.size();
+    const bool use_gemm = ( !do_pi_gradient_ ) && ( nact > 0 );
 
-        // pi(r) = D(mu,nu; lambda,sigma) * phi(r,mu) * phi(r,nu) * phi(r,lambda) * phi(r,sigma)
-        for (size_t n = 0; n < D2ab.size(); n++) {
-
-            int i = D2ab[n].i;
-            int j = D2ab[n].j;
-            int k = D2ab[n].k;
-            int l = D2ab[n].l;
-
-            int hi = symmetry_[i];
-            int hj = symmetry_[j];
-            int hk = symmetry_[k];
-            int hl = symmetry_[l];
-
-            int ii = i - pitzer_offset_[hi];
-            int jj = j - pitzer_offset_[hj];
-            int kk = k - pitzer_offset_[hk];
-            int ll = l - pitzer_offset_[hl];
-
-            dum += super_phi_->pointer(hi)[p][ii] * 
-                   super_phi_->pointer(hj)[p][jj] * 
-                   super_phi_->pointer(hk)[p][kk] * 
-                   super_phi_->pointer(hl)[p][ll] * D2ab[n].value;
-
-        }
-
-        pi_p[p] = dum;
+    std::vector<int> actmap;                  // full pitzer index -> compact active (-1 if not active)
+    if ( use_gemm ) {
+        actmap.assign(nmo_, -1);
+        for (int c = 0; c < nact; c++) actmap[ active_full_indices_[c] ] = c;
     }
 
-    pi_x_ = (std::shared_ptr<Vector>)(new Vector(phi_points_));
-    pi_y_ = (std::shared_ptr<Vector>)(new Vector(phi_points_));
-    pi_z_ = (std::shared_ptr<Vector>)(new Vector(phi_points_));
-    
-    double * pi_xp = pi_x_->pointer();
-    double * pi_yp = pi_y_->pointer();
-    double * pi_zp = pi_z_->pointer();
-    
-    double ** phi_x = super_phi_x_->pointer();
-    double ** phi_y = super_phi_y_->pointer();
-    double ** phi_z = super_phi_z_->pointer();
+    const int pairlen = nact * nact;
+    std::shared_ptr<Matrix> D2act;
+    double ** D2actp = nullptr;
+    if ( use_gemm ) {
+        D2act = std::make_shared<Matrix>("D2 active", pairlen, pairlen);
+        D2actp = D2act->pointer();
+    }
 
-    for (int p = 0; p < phi_points_; p++) {
-
-        double dum_x = 0.0;
-        double dum_y = 0.0;
-        double dum_z = 0.0;
-
-        // pi(r) = D(mu,nu; lambda,sigma) * phi(r,mu) * phi(r,nu) * phi(r,lambda) * phi(r,sigma)
-        for (size_t n = 0; n < D2ab.size(); n++) {
-
-            int i = D2ab[n].i;
-            int j = D2ab[n].j;
-            int k = D2ab[n].k;
-            int l = D2ab[n].l;
-            
-            int hi = symmetry_[i];
-            int hj = symmetry_[j];
-            int hk = symmetry_[k]; 
-            int hl = symmetry_[l];
-            
-            int ii = i - pitzer_offset_[hi];
-            int jj = j - pitzer_offset_[hj];
-            int kk = k - pitzer_offset_[hk];
-            int ll = l - pitzer_offset_[hl];
-
-            dum_x += ( super_phi_x_->pointer(hi)[p][ii] *
-                       super_phi_->pointer(hj)[p][jj] *
-                       super_phi_->pointer(hk)[p][kk] * 
-                       super_phi_->pointer(hl)[p][ll] +
-
-                       super_phi_->pointer(hi)[p][ii] *
-                       super_phi_x_->pointer(hj)[p][jj] *
-                       super_phi_->pointer(hk)[p][kk] * 
-                       super_phi_->pointer(hl)[p][ll] +
-
-                       super_phi_->pointer(hi)[p][ii] *
-                       super_phi_->pointer(hj)[p][jj] *
-                       super_phi_x_->pointer(hk)[p][kk] * 
-                       super_phi_->pointer(hl)[p][ll] +
-
-                       super_phi_->pointer(hi)[p][ii] *
-                       super_phi_->pointer(hj)[p][jj] *
-                       super_phi_->pointer(hk)[p][kk] * 
-                       super_phi_x_->pointer(hl)[p][ll] ) * D2ab[n].value;
-
-            dum_y += ( super_phi_y_->pointer(hi)[p][ii] *
-                       super_phi_->pointer(hj)[p][jj] *
-                       super_phi_->pointer(hk)[p][kk] * 
-                       super_phi_->pointer(hl)[p][ll] +
-
-                       super_phi_->pointer(hi)[p][ii] *
-                       super_phi_y_->pointer(hj)[p][jj] *
-                       super_phi_->pointer(hk)[p][kk] * 
-                       super_phi_->pointer(hl)[p][ll] +
-
-                       super_phi_->pointer(hi)[p][ii] *
-                       super_phi_->pointer(hj)[p][jj] *
-                       super_phi_y_->pointer(hk)[p][kk] * 
-                       super_phi_->pointer(hl)[p][ll] +
-
-                       super_phi_->pointer(hi)[p][ii] *
-                       super_phi_->pointer(hj)[p][jj] *
-                       super_phi_->pointer(hk)[p][kk] * 
-                       super_phi_y_->pointer(hl)[p][ll] ) * D2ab[n].value;
-
-            dum_z += ( super_phi_z_->pointer(hi)[p][ii] *
-                       super_phi_->pointer(hj)[p][jj] *
-                       super_phi_->pointer(hk)[p][kk] * 
-                       super_phi_->pointer(hl)[p][ll] +
-
-                       super_phi_->pointer(hi)[p][ii] *
-                       super_phi_z_->pointer(hj)[p][jj] *
-                       super_phi_->pointer(hk)[p][kk] * 
-                       super_phi_->pointer(hl)[p][ll] +
-
-                       super_phi_->pointer(hi)[p][ii] *
-                       super_phi_->pointer(hj)[p][jj] *
-                       super_phi_z_->pointer(hk)[p][kk] * 
-                       super_phi_->pointer(hl)[p][ll] +
-
-                       super_phi_->pointer(hi)[p][ii] *
-                       super_phi_->pointer(hj)[p][jj] *
-                       super_phi_->pointer(hk)[p][kk] * 
-                       super_phi_z_->pointer(hl)[p][ll] ) * D2ab[n].value;
-
+    // Resolve symmetry/pitzer arithmetic and the value ONCE per element (these
+    // are invariant across grid points), screen out negligible elements
+    // (WriteTPDM stores the symmetry-allowed block densely incl. near-zeros),
+    // and route active-active elements to the dense D2act matrix, the rest to
+    // the scalar list.
+    const size_t nn = D2ab.size();
+    std::vector<int>    li, lj, lk, ll;   // local (within-irrep) orbital indices
+    std::vector<int>    hi, hj, hk, hl;   // irreps
+    std::vector<double> val;
+    li.reserve(nn); lj.reserve(nn); lk.reserve(nn); ll.reserve(nn);
+    hi.reserve(nn); hj.reserve(nn); hk.reserve(nn); hl.reserve(nn);
+    val.reserve(nn);
+    size_t n_aa = 0;
+    for (size_t n = 0; n < nn; n++) {
+        double v = D2ab[n].value;
+        if ( std::fabs(v) < rdm_screening_tol_ ) continue;
+        int i = D2ab[n].i;
+        int j = D2ab[n].j;
+        int k = D2ab[n].k;
+        int l = D2ab[n].l;
+        if ( use_gemm ) {
+            int ti = actmap[i], tj = actmap[j], tk = actmap[k], tl = actmap[l];
+            if ( ti >= 0 && tj >= 0 && tk >= 0 && tl >= 0 ) {
+                // pi = sum phi_i phi_j D(ij;kl) phi_k phi_l  -> bra=(ij), ket=(kl)
+                D2actp[ti*nact + tj][tk*nact + tl] += v;
+                n_aa++;
+                continue;
+            }
         }
+        int Hi = symmetry_[i], Hj = symmetry_[j], Hk = symmetry_[k], Hl = symmetry_[l];
+        hi.push_back(Hi); hj.push_back(Hj); hk.push_back(Hk); hl.push_back(Hl);
+        li.push_back(i - pitzer_offset_[Hi]);
+        lj.push_back(j - pitzer_offset_[Hj]);
+        lk.push_back(k - pitzer_offset_[Hk]);
+        ll.push_back(l - pitzer_offset_[Hl]);
+        val.push_back(v);
+    }
+    const size_t nkeep = val.size();
 
-        pi_xp[p] = dum_x;
-        pi_yp[p] = dum_y;
-        pi_zp[p] = dum_z;
+    // cache the per-irrep block base pointers so the inner loop avoids the
+    // virtual Matrix::pointer(h) dispatch on every term
+    std::vector<double**> phi(nirrep_);
+    for (int h = 0; h < nirrep_; h++) {
+        phi[h]  = super_phi_->pointer(h);
+    }
+
+    const int *  hip = hi.data(); const int * hjp = hj.data();
+    const int *  hkp = hk.data(); const int * hlp = hl.data();
+    const int *  lip = li.data(); const int * ljp = lj.data();
+    const int *  lkp = lk.data(); const int * llp = ll.data();
+    const double * vp = val.data();
+    double *** phib  = (double***)phi.data();
+
+    // --- diagnostics: where does Build Pi spend its time? ---
+    outfile->Printf("\n");
+    outfile->Printf("        [pi] grid points (phi_points_) = %ld\n", (long int)phi_points_);
+    outfile->Printf("        [pi] |D2ab| (raw)              = %zu\n", nn);
+    outfile->Printf("        [pi] active orbitals (nact)    = %d  (GEMM %s)\n",
+                    nact, use_gemm ? "ENGAGED" : "OFF -> all scalar");
+    outfile->Printf("        [pi] active-active -> GEMM     = %zu\n", n_aa);
+    outfile->Printf("        [pi] remainder    -> scalar    = %zu\n", nkeep);
+    outfile->Flush();
+
+    if ( !do_pi_gradient_ ) {
+
+        // ---- scalar remainder: core-core, core-active (or everything if no GEMM) ----
+        double t_scalar = omp_get_wtime();
+        #pragma omp parallel for schedule(static)
+        for (int p = 0; p < phi_points_; p++) {
+
+            double dum = 0.0;
+
+            // pi(r) = D(mu,nu;lambda,sigma) phi(r,mu) phi(r,nu) phi(r,lambda) phi(r,sigma)
+            for (size_t n = 0; n < nkeep; n++) {
+                double phi_i = phib[hip[n]][p][lip[n]];
+                double phi_j = phib[hjp[n]][p][ljp[n]];
+                double phi_k = phib[hkp[n]][p][lkp[n]];
+                double phi_l = phib[hlp[n]][p][llp[n]];
+                dum += phi_i * phi_j * phi_k * phi_l * vp[n];
+            }
+
+            pi_p[p] = dum;
+        }
+        outfile->Printf("        [pi] scalar remainder time     = %8.1f s\n", omp_get_wtime() - t_scalar);
+        outfile->Flush();
+
+        // ---- dense active-active block via BLAS-3 GEMM ----
+        double t_gemm = omp_get_wtime();
+        if ( use_gemm && pairlen > 0 ) {
+
+            // (irrep, local index) of each active orbital for gathering phi(active)
+            std::vector<int> a_h(nact), a_l(nact);
+            for (int c = 0; c < nact; c++) {
+                int full = active_full_indices_[c];
+                int h = symmetry_[full];
+                a_h[c] = h;
+                a_l[c] = full - pitzer_offset_[h];
+            }
+
+            const int BLOCK = 2048;
+            auto PhiAct = std::make_shared<Matrix>("phi active", BLOCK, nact);
+            auto Bmat   = std::make_shared<Matrix>("B pair products", BLOCK, pairlen);
+            auto Tmat   = std::make_shared<Matrix>("T = B D2act^T", BLOCK, pairlen);
+            double ** PAp = PhiAct->pointer();
+            double ** Bp  = Bmat->pointer();
+
+            for (int pstart = 0; pstart < phi_points_; pstart += BLOCK) {
+                int np = ( phi_points_ - pstart < BLOCK ) ? (int)(phi_points_ - pstart) : BLOCK;
+
+                // gather active phi values: PhiAct[pp][c] = phi_{active c}(pstart+pp)
+                #pragma omp parallel for schedule(static)
+                for (int pp = 0; pp < np; pp++) {
+                    int p = pstart + pp;
+                    for (int c = 0; c < nact; c++) PAp[pp][c] = phib[a_h[c]][p][a_l[c]];
+                }
+
+                // orbital-pair products: B[pp][t*nact+u] = phi_t * phi_u
+                #pragma omp parallel for schedule(static)
+                for (int pp = 0; pp < np; pp++) {
+                    double * pa = PAp[pp];
+                    double * b  = Bp[pp];
+                    for (int t = 0; t < nact; t++) {
+                        double pt = pa[t];
+                        int off = t * nact;
+                        for (int u = 0; u < nact; u++) b[off + u] = pt * pa[u];
+                    }
+                }
+
+                // T = B * D2act^T  (D2act is symmetric in bra<->ket; transpose is exact)
+                Tmat->gemm(false, true, 1.0, Bmat, D2act, 0.0);
+                double ** Tp = Tmat->pointer();
+
+                // pi_aa(p) += sum_{(t,u)} B[pp][(t,u)] * T[pp][(t,u)]
+                #pragma omp parallel for schedule(static)
+                for (int pp = 0; pp < np; pp++) {
+                    double s = 0.0;
+                    double * b  = Bp[pp];
+                    double * tt = Tp[pp];
+                    for (int q = 0; q < pairlen; q++) s += b[q] * tt[q];
+                    pi_p[pstart + pp] += s;
+                }
+            }
+        }
+        outfile->Printf("        [pi] active-active GEMM time   = %8.1f s\n", omp_get_wtime() - t_gemm);
+        outfile->Flush();
+
+    } else {
+
+        // value + gradient -- needed only for fully-translated functionals
+        pi_x_ = (std::shared_ptr<Vector>)(new Vector(phi_points_));
+        pi_y_ = (std::shared_ptr<Vector>)(new Vector(phi_points_));
+        pi_z_ = (std::shared_ptr<Vector>)(new Vector(phi_points_));
+
+        double * pi_xp = pi_x_->pointer();
+        double * pi_yp = pi_y_->pointer();
+        double * pi_zp = pi_z_->pointer();
+
+        std::vector<double**> phix(nirrep_), phiy(nirrep_), phiz(nirrep_);
+        for (int h = 0; h < nirrep_; h++) {
+            phix[h] = super_phi_x_->pointer(h);
+            phiy[h] = super_phi_y_->pointer(h);
+            phiz[h] = super_phi_z_->pointer(h);
+        }
+        double *** phixb = (double***)phix.data();
+        double *** phiyb = (double***)phiy.data();
+        double *** phizb = (double***)phiz.data();
+
+        #pragma omp parallel for schedule(static)
+        for (int p = 0; p < phi_points_; p++) {
+
+            double dum = 0.0, dum_x = 0.0, dum_y = 0.0, dum_z = 0.0;
+
+            for (size_t n = 0; n < nkeep; n++) {
+                double phi_i = phib[hip[n]][p][lip[n]];
+                double phi_j = phib[hjp[n]][p][ljp[n]];
+                double phi_k = phib[hkp[n]][p][lkp[n]];
+                double phi_l = phib[hlp[n]][p][llp[n]];
+                double v     = vp[n];
+
+                dum += phi_i * phi_j * phi_k * phi_l * v;
+
+                dum_x += ( phixb[hip[n]][p][lip[n]] * phi_j * phi_k * phi_l
+                         + phi_i * phixb[hjp[n]][p][ljp[n]] * phi_k * phi_l
+                         + phi_i * phi_j * phixb[hkp[n]][p][lkp[n]] * phi_l
+                         + phi_i * phi_j * phi_k * phixb[hlp[n]][p][llp[n]] ) * v;
+
+                dum_y += ( phiyb[hip[n]][p][lip[n]] * phi_j * phi_k * phi_l
+                         + phi_i * phiyb[hjp[n]][p][ljp[n]] * phi_k * phi_l
+                         + phi_i * phi_j * phiyb[hkp[n]][p][lkp[n]] * phi_l
+                         + phi_i * phi_j * phi_k * phiyb[hlp[n]][p][llp[n]] ) * v;
+
+                dum_z += ( phizb[hip[n]][p][lip[n]] * phi_j * phi_k * phi_l
+                         + phi_i * phizb[hjp[n]][p][ljp[n]] * phi_k * phi_l
+                         + phi_i * phi_j * phizb[hkp[n]][p][lkp[n]] * phi_l
+                         + phi_i * phi_j * phi_k * phizb[hlp[n]][p][llp[n]] ) * v;
+            }
+
+            pi_p[p]  = dum;
+            pi_xp[p] = dum_x;
+            pi_yp[p] = dum_y;
+            pi_zp[p] = dum_z;
+        }
     }
     outfile->Printf(" Done. <==\n\n");
 }
@@ -727,59 +830,87 @@ void RealSpaceDensity::BuildRhoFast(){
     rho_a_   = (std::shared_ptr<Vector>)(new Vector(phi_points_));
     rho_b_   = (std::shared_ptr<Vector>)(new Vector(phi_points_));
     rho_   = (std::shared_ptr<Vector>)(new Vector(phi_points_));
+    tau_a_   = (std::shared_ptr<Vector>)(new Vector(phi_points_));
+    tau_b_   = (std::shared_ptr<Vector>)(new Vector(phi_points_));
 
     double * rho_ap = rho_a_->pointer();
     double * rho_bp = rho_b_->pointer();
     double * rho_p = rho_->pointer();
+    double * tau_ap = tau_a_->pointer();
+    double * tau_bp = tau_b_->pointer();
+    double * grid_wp = grid_w_->pointer();
+
+    // Resolve symmetry / pitzer-offset arithmetic once per non-zero OPDM
+    // element rather than at every grid point (it is invariant across p), and
+    // screen out negligible elements (WriteOPDM stores the active block densely).
+    const size_t na_raw = opdm_a_.size();
+    const size_t nb_raw = opdm_b_.size();
+    std::vector<int> a_hi, a_hj, a_li, a_lj;
+    std::vector<int> b_hi, b_hj, b_li, b_lj;
+    std::vector<double> a_val, b_val;
+    a_hi.reserve(na_raw); a_hj.reserve(na_raw); a_li.reserve(na_raw); a_lj.reserve(na_raw); a_val.reserve(na_raw);
+    b_hi.reserve(nb_raw); b_hj.reserve(nb_raw); b_li.reserve(nb_raw); b_lj.reserve(nb_raw); b_val.reserve(nb_raw);
+    for (size_t n = 0; n < na_raw; n++) {
+        if ( std::fabs(opdm_a_[n].value) < rdm_screening_tol_ ) continue;
+        int i = opdm_a_[n].i, j = opdm_a_[n].j;
+        int Hi = symmetry_[i], Hj = symmetry_[j];
+        a_hi.push_back(Hi); a_hj.push_back(Hj);
+        a_li.push_back(i - pitzer_offset_[Hi]);
+        a_lj.push_back(j - pitzer_offset_[Hj]);
+        a_val.push_back(opdm_a_[n].value);
+    }
+    for (size_t n = 0; n < nb_raw; n++) {
+        if ( std::fabs(opdm_b_[n].value) < rdm_screening_tol_ ) continue;
+        int i = opdm_b_[n].i, j = opdm_b_[n].j;
+        int Hi = symmetry_[i], Hj = symmetry_[j];
+        b_hi.push_back(Hi); b_hj.push_back(Hj);
+        b_li.push_back(i - pitzer_offset_[Hi]);
+        b_lj.push_back(j - pitzer_offset_[Hj]);
+        b_val.push_back(opdm_b_[n].value);
+    }
+    const size_t na = a_val.size();
+    const size_t nb = b_val.size();
+
+    // cache per-irrep block base pointers (avoid virtual pointer() in the loop)
+    std::vector<double**> phi(nirrep_), phix(nirrep_), phiy(nirrep_), phiz(nirrep_);
+    for (int h = 0; h < nirrep_; h++) {
+        phi[h]  = super_phi_->pointer(h);
+        phix[h] = super_phi_x_->pointer(h);
+        phiy[h] = super_phi_y_->pointer(h);
+        phiz[h] = super_phi_z_->pointer(h);
+    }
+    double *** phib  = (double***)phi.data();
+    double *** phixb = (double***)phix.data();
+    double *** phiyb = (double***)phiy.data();
+    double *** phizb = (double***)phiz.data();
 
     double temp_tot = 0.0;
     double temp_a = 0.0;
     double temp_b = 0.0;
+    #pragma omp parallel for schedule(static) reduction(+:temp_tot,temp_a,temp_b)
     for (int p = 0; p < phi_points_; p++) {
 
         // rho_a(r)
         double duma = 0.0;
-        for (size_t n = 0; n < opdm_a_.size(); n++) {
-
-            int i = opdm_a_[n].i;
-            int j = opdm_a_[n].j;
-
-            int hi = symmetry_[i];
-            int hj = symmetry_[j];
-
-            int ii = i - pitzer_offset_[hi];
-            int jj = j - pitzer_offset_[hj];
-
-            duma += super_phi_->pointer(hi)[p][ii] *
-                    super_phi_->pointer(hj)[p][jj] * opdm_a_[n].value;
-
+        for (size_t n = 0; n < na; n++) {
+            duma += phib[a_hi[n]][p][a_li[n]] *
+                    phib[a_hj[n]][p][a_lj[n]] * a_val[n];
         }
         rho_ap[p] = duma;
 
         // rho_b(r)
         double dumb = 0.0;
-        for (size_t n = 0; n < opdm_b_.size(); n++) {
-
-            int i = opdm_b_[n].i;
-            int j = opdm_b_[n].j;
-
-            int hi = symmetry_[i];
-            int hj = symmetry_[j];
-
-            int ii = i - pitzer_offset_[hi];
-            int jj = j - pitzer_offset_[hj];
-
-            dumb += super_phi_->pointer(hi)[p][ii] *
-                    super_phi_->pointer(hj)[p][jj] * opdm_b_[n].value;
-
+        for (size_t n = 0; n < nb; n++) {
+            dumb += phib[b_hi[n]][p][b_li[n]] *
+                    phib[b_hj[n]][p][b_lj[n]] * b_val[n];
         }
         rho_bp[p] = dumb;
 
-        rho_p[p] = rho_ap[p] + rho_bp[p];    
+        rho_p[p] = duma + dumb;
 
-        temp_tot += rho_p[p]  * grid_w_->pointer()[p];
-        temp_a   += rho_ap[p] * grid_w_->pointer()[p];
-        temp_b   += rho_bp[p] * grid_w_->pointer()[p];
+        temp_tot += rho_p[p]  * grid_wp[p];
+        temp_a   += duma * grid_wp[p];
+        temp_b   += dumb * grid_wp[p];
     }
 
     outfile->Printf("\n");
@@ -797,10 +928,6 @@ void RealSpaceDensity::BuildRhoFast(){
     rho_a_z_ = (std::shared_ptr<Vector>)(new Vector(phi_points_));
     rho_b_z_ = (std::shared_ptr<Vector>)(new Vector(phi_points_));
 
-    double ** phi_x = super_phi_x_->pointer();
-    double ** phi_y = super_phi_y_->pointer();
-    double ** phi_z = super_phi_z_->pointer();
-
     double * rho_a_xp = rho_a_x_->pointer();
     double * rho_b_xp = rho_b_x_->pointer();
 
@@ -810,6 +937,7 @@ void RealSpaceDensity::BuildRhoFast(){
     double * rho_a_zp = rho_a_z_->pointer();
     double * rho_b_zp = rho_b_z_->pointer();
 
+    #pragma omp parallel for schedule(static)
     for (int p = 0; p < phi_points_; p++) {
 
         // rho'_a(r)
@@ -819,29 +947,20 @@ void RealSpaceDensity::BuildRhoFast(){
         double duma_z = 0.0;
         double dumta = 0.0;
 
-        for (size_t n = 0; n < opdm_a_.size(); n++) {
+        for (size_t n = 0; n < na; n++) {
 
-            int i = opdm_a_[n].i;
-            int j = opdm_a_[n].j;
-            
-            int hi = symmetry_[i];
-            int hj = symmetry_[j];
-            
-            int ii = i - pitzer_offset_[hi];
-            int jj = j - pitzer_offset_[hj];
-            
-            duma_x += ( super_phi_x_->pointer(hi)[p][ii] * super_phi_->pointer(hj)[p][jj] 
-                    +   super_phi_->pointer(hi)[p][ii] * super_phi_x_->pointer(hj)[p][jj] ) * opdm_a_[n].value;
+            int hi = a_hi[n], hj = a_hj[n], ii = a_li[n], jj = a_lj[n];
+            double v = a_val[n];
 
-            duma_y += ( super_phi_y_->pointer(hi)[p][ii] * super_phi_->pointer(hj)[p][jj] 
-                    +   super_phi_->pointer(hi)[p][ii] * super_phi_y_->pointer(hj)[p][jj] ) * opdm_a_[n].value;
+            double pi_  = phib[hi][p][ii],  pj_  = phib[hj][p][jj];
+            double pix = phixb[hi][p][ii], pjx = phixb[hj][p][jj];
+            double piy = phiyb[hi][p][ii], pjy = phiyb[hj][p][jj];
+            double piz = phizb[hi][p][ii], pjz = phizb[hj][p][jj];
 
-            duma_z += ( super_phi_z_->pointer(hi)[p][ii] * super_phi_->pointer(hj)[p][jj] 
-                    +   super_phi_->pointer(hi)[p][ii] * super_phi_z_->pointer(hj)[p][jj] ) * opdm_a_[n].value;
-
-            dumta  += ( super_phi_x_->pointer(hi)[p][ii] * super_phi_x_->pointer(hj)[p][jj] 
-    	        +   super_phi_y_->pointer(hi)[p][ii] * super_phi_y_->pointer(hj)[p][jj]
-                    +   super_phi_z_->pointer(hi)[p][ii] * super_phi_z_->pointer(hj)[p][jj] ) * opdm_a_[n].value;
+            duma_x += ( pix * pj_ + pi_ * pjx ) * v;
+            duma_y += ( piy * pj_ + pi_ * pjy ) * v;
+            duma_z += ( piz * pj_ + pi_ * pjz ) * v;
+            dumta  += ( pix * pjx + piy * pjy + piz * pjz ) * v;
         }
 
         // rho'_b(r)
@@ -851,29 +970,20 @@ void RealSpaceDensity::BuildRhoFast(){
         double dumb_z = 0.0;
         double dumtb = 0.0;
 
-        for (size_t n = 0; n < opdm_b_.size(); n++) {
-            
-            int i = opdm_b_[n].i;
-            int j = opdm_b_[n].j;
-            
-            int hi = symmetry_[i];
-            int hj = symmetry_[j];
-            
-            int ii = i - pitzer_offset_[hi];
-            int jj = j - pitzer_offset_[hj];
-            
-            dumb_x += ( super_phi_x_->pointer(hi)[p][ii] * super_phi_->pointer(hj)[p][jj] 
-                    +   super_phi_->pointer(hi)[p][ii] * super_phi_x_->pointer(hj)[p][jj] ) * opdm_b_[n].value;
-            
-            dumb_y += ( super_phi_y_->pointer(hi)[p][ii] * super_phi_->pointer(hj)[p][jj] 
-                    +   super_phi_->pointer(hi)[p][ii] * super_phi_y_->pointer(hj)[p][jj] ) * opdm_b_[n].value;
-            
-            dumb_z += ( super_phi_z_->pointer(hi)[p][ii] * super_phi_->pointer(hj)[p][jj] 
-                    +   super_phi_->pointer(hi)[p][ii] * super_phi_z_->pointer(hj)[p][jj] ) * opdm_b_[n].value;
+        for (size_t n = 0; n < nb; n++) {
 
-            dumtb  += ( super_phi_x_->pointer(hi)[p][ii] * super_phi_x_->pointer(hj)[p][jj] 
-    	        +   super_phi_y_->pointer(hi)[p][ii] * super_phi_y_->pointer(hj)[p][jj]
-                    +   super_phi_z_->pointer(hi)[p][ii] * super_phi_z_->pointer(hj)[p][jj] ) * opdm_b_[n].value;
+            int hi = b_hi[n], hj = b_hj[n], ii = b_li[n], jj = b_lj[n];
+            double v = b_val[n];
+
+            double pi_  = phib[hi][p][ii],  pj_  = phib[hj][p][jj];
+            double pix = phixb[hi][p][ii], pjx = phixb[hj][p][jj];
+            double piy = phiyb[hi][p][ii], pjy = phiyb[hj][p][jj];
+            double piz = phizb[hi][p][ii], pjz = phizb[hj][p][jj];
+
+            dumb_x += ( pix * pj_ + pi_ * pjx ) * v;
+            dumb_y += ( piy * pj_ + pi_ * pjy ) * v;
+            dumb_z += ( piz * pj_ + pi_ * pjz ) * v;
+            dumtb  += ( pix * pjx + piy * pjy + piz * pjz ) * v;
         }
 
         rho_a_xp[p] = duma_x;
@@ -884,6 +994,9 @@ void RealSpaceDensity::BuildRhoFast(){
 
         rho_a_zp[p] = duma_z;
         rho_b_zp[p] = dumb_z;
+
+        tau_ap[p] = 0.5 * dumta;
+        tau_bp[p] = 0.5 * dumtb;
     }
 
     outfile->Printf("    ... Done. <==\n");
@@ -908,6 +1021,19 @@ void RealSpaceDensity::ReadTPDM() {
     memset((void*)&tpdm_ab_[0],'\0',nab * sizeof(tpdm));
 
     psio->read_entry(PSIF_V2RDM_D2AB,"D2ab",(char*)&tpdm_ab_[0],nab * sizeof(tpdm));
+
+    // also grab the list of active orbitals (full-space pitzer indices) that
+    // WriteTPDM stored. this lets BuildPiFast peel off the dense active-active
+    // block and evaluate it as a BLAS-3 GEMM (see BuildPiFast).
+    active_full_indices_.clear();
+    if ( psio->tocscan(PSIF_V2RDM_D2AB,"ACTIVE ORBITALS") != nullptr ) {
+        int nact = 0;
+        psio->read_entry(PSIF_V2RDM_D2AB,"NUMBER ACTIVE ORBITALS",(char*)&nact,sizeof(int));
+        if ( nact > 0 ) {
+            active_full_indices_.resize(nact);
+            psio->read_entry(PSIF_V2RDM_D2AB,"ACTIVE ORBITALS",(char*)&active_full_indices_[0],nact * sizeof(int));
+        }
+    }
 
     psio->close(PSIF_V2RDM_D2AB,1);
 }

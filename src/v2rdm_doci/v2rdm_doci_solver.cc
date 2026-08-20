@@ -59,11 +59,15 @@
 
 #include <bpsdp_solver.h>
 #include <rrsdp_solver.h>
+#include "misc/cvxpy_solver.h"
+#include "misc/gpu_admm_solver.h"
 
 using namespace psi;
 using namespace fnocc;
 
 namespace hilbert{
+
+thread_local int v2RDM_DOCISolver::offset = 0;
 
 static void evaluate_Au(double* Au, double* u, void * data) {
 
@@ -129,7 +133,7 @@ v2RDM_DOCISolver::~v2RDM_DOCISolver()
 void  v2RDM_DOCISolver::common_init(){
 
     is_df_ = false;
-    if ( options_.get_str("SCF_TYPE") == "DF" || options_.get_str("SCF_TYPE") == "CD" ) {
+    if ( (options_.get_str("SCF_TYPE") == "DF" || options_.get_str("SCF_TYPE") == "DISK_DF" || options_.get_str("SCF_TYPE") == "MEM_DF") || options_.get_str("SCF_TYPE") == "CD" ) {
         is_df_ = true;
     }
 
@@ -877,7 +881,7 @@ void  v2RDM_DOCISolver::common_init(){
     if ( is_df_ ) {
         // storage requirements for df integrals
         nQ_ = Process::environment.globals["NAUX (SCF)"];
-        if ( options_.get_str("SCF_TYPE") == "DF" ) {
+        if ( (options_.get_str("SCF_TYPE") == "DF" || options_.get_str("SCF_TYPE") == "DISK_DF" || options_.get_str("SCF_TYPE") == "MEM_DF") ) {
             std::shared_ptr<BasisSet> primary = reference_wavefunction_->basisset();
             std::shared_ptr<BasisSet> auxiliary = reference_wavefunction_->get_basisset("DF_BASIS_SCF");
 
@@ -990,7 +994,7 @@ void  v2RDM_DOCISolver::common_init(){
 
     int nthread = omp_get_max_threads();
 
-    orbopt_data_    = (double*)malloc(15*sizeof(double));
+    orbopt_data_    = (double*)malloc(25*sizeof(double));
     orbopt_data_[0] = (double)nthread;
     orbopt_data_[1] = 1.0; // include active-active rotations
     orbopt_data_[2] = (double)nfrzc_; //(double)options_.get_int("ORBOPT_FROZEN_CORE");
@@ -1018,6 +1022,16 @@ void  v2RDM_DOCISolver::common_init(){
     else if ( options_.get_str("ORBOPT_ALGORITHM") == "DAI_YUAN" )         orbopt_data_[14] = 2.0;
     else if ( options_.get_str("ORBOPT_ALGORITHM") == "HAGER_ZHANG" )      orbopt_data_[14] = 3.0;
     else if ( options_.get_str("ORBOPT_ALGORITHM") == "KOU_DAI" )          orbopt_data_[14] = 4.0;
+    orbopt_data_[15] = 0.0;  // FOCAS step memory disabled for legacy callers
+    orbopt_data_[16] = 0.0;  // C1 blocked DF transform disabled
+    orbopt_data_[17] = 0.0;
+    orbopt_data_[18] = 0.0;
+    orbopt_data_[19] = 1.0;
+    orbopt_data_[20] = 2.0;  // historical FOCAS step growth factor
+    orbopt_data_[21] = 0.0;  // optional CUDA C1 DF transform disabled
+    orbopt_data_[22] = 0.0;
+    orbopt_data_[23] = 0.0;
+    orbopt_data_[24] = 0.0;
 
     orbopt_converged_ = false;
 
@@ -1099,6 +1113,31 @@ double v2RDM_DOCISolver::compute_energy() {
 
         sdp_ = (std::shared_ptr<libsdp::SDPSolver>)(new libsdp::RRSDPSolver(dimx_,nconstraints_,sdp_options));
 
+    }else if ( options_.get_str("SDP_SOLVER") == "CVXPY" ) {
+
+        libsdp::SDPOptions sdp_options;
+        sdp_options.sdp_objective_convergence = options_.get_double("E_CONVERGENCE");
+        sdp_options.sdp_error_convergence     = options_.get_double("R_CONVERGENCE");
+        sdp_options.maxiter                   = options_.get_int("MAXITER");
+
+        sdp_monitor = rrsdp_monitor;
+
+        std::string cvxpy_sol = options_.get_str("CVXPY_SOLVER");
+        sdp_ = (std::shared_ptr<libsdp::SDPSolver>)(new libsdp::CVXPYSolver(dimx_,nconstraints_,sdp_options,cvxpy_sol));
+
+    }else if ( options_.get_str("SDP_SOLVER") == "GPU_ADMM" ) {
+
+        libsdp::SDPOptions sdp_options;
+        sdp_options.sdp_objective_convergence = options_.get_double("E_CONVERGENCE");
+        sdp_options.sdp_error_convergence     = options_.get_double("R_CONVERGENCE");
+        sdp_options.cg_convergence            = options_.get_double("CG_CONVERGENCE");
+        sdp_options.cg_maxiter                = options_.get_int("CG_MAXITER");
+        sdp_options.maxiter                   = options_.get_int("MAXITER");
+
+        sdp_monitor = bpsdp_monitor;
+
+        sdp_ = (std::shared_ptr<libsdp::SDPSolver>)(new libsdp::GPUADMMSolver(dimx_,nconstraints_,sdp_options));
+
     }else {
 
         throw PsiException("unknown SDP_SOLVER",__FILE__,__LINE__);
@@ -1107,6 +1146,8 @@ double v2RDM_DOCISolver::compute_energy() {
 
     // iterate
     int orbopt_iter = 0;
+    double previous_total_energy = 1.0e9;
+    int macro_iter = 0;
     do { 
 
         print_header();
@@ -1127,6 +1168,28 @@ double v2RDM_DOCISolver::compute_energy() {
 
         }else {
             orbopt_converged_ = true;
+        }
+
+        double energy_primal = C_DDOT(dimx_,c->pointer(),1,x->pointer(),1);
+        double total_energy = energy_primal + enuc_ + efzc_;
+
+        if (options_.get_bool("OPTIMIZE_ORBITALS") && !orbopt_converged_) {
+            double total_energy_change = 0.0;
+            if (macro_iter > 0) {
+                total_energy_change = total_energy - previous_total_energy;
+                outfile->Printf("            Change in total energy: %20.12lf\n", total_energy_change);
+            }
+            if ((options_.get_str("SDP_SOLVER") == "BPSDP" || options_.get_str("SDP_SOLVER") == "GPU_ADMM") && macro_iter > 0 && total_energy >= previous_total_energy) {
+                outfile->Printf("            SDP energy did not decrease (previous: %20.12lf, current: %20.12lf). Terminating DOCI.\n", previous_total_energy, total_energy);
+                break;
+            }
+            previous_total_energy = total_energy;
+            macro_iter++;
+        }
+
+        if (sdp_->oiter_total() >= options_.get_int("MAXITER")) {
+            outfile->Printf("            Total SDP iterations (%ld) reached MAXITER (%d). Terminating DOCI.\n", sdp_->oiter_total(), options_.get_int("MAXITER"));
+            break;
         }
 
         outfile->Printf("\n");
@@ -1830,7 +1893,7 @@ void v2RDM_DOCISolver::print_header() {
     outfile->Printf("    initial primal energy: %20.12lf\n",C_DDOT(dimx_,c->pointer(),1,x->pointer(),1));
     outfile->Printf("\n");
 
-    if ( options_.get_str("SDP_SOLVER") == "BPSDP" ) {
+    if ( options_.get_str("SDP_SOLVER") == "BPSDP" || options_.get_str("SDP_SOLVER") == "GPU_ADMM" ) {
 
         outfile->Printf("      oiter");
         outfile->Printf(" iiter");

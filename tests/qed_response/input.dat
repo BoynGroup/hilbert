@@ -16,7 +16,7 @@ symmetry c1
 
 set {
   basis aug-cc-pvdz
-  scf_type df
+  scf_type disk_df
   e_convergence 1e-11
   d_convergence 1e-11
   cholesky_tolerance 1e-14

@@ -93,7 +93,7 @@ void PolaritonicUTDDFT::common_init(std::shared_ptr<Wavefunction> dummy_wfn) {
     }
 
     // check SCF type
-    if ( options_.get_str("SCF_TYPE") != "DF" && options_.get_str("SCF_TYPE") != "CD" && options_.get_str("SCF_TYPE") != "PK") {
+    if ( (options_.get_str("SCF_TYPE") != "DF" && options_.get_str("SCF_TYPE") != "DISK_DF" && options_.get_str("SCF_TYPE") != "MEM_DF") && options_.get_str("SCF_TYPE") != "CD" && options_.get_str("SCF_TYPE") != "PK") {
         throw PsiException("invalid SCF_TYPE for qed-utddft",__FILE__,__LINE__);
     }
 
@@ -116,7 +116,7 @@ void PolaritonicUTDDFT::common_init(std::shared_ptr<Wavefunction> dummy_wfn) {
     // apparently compute_Vx wants me to set the density
     potential_->set_D({Da_,Db_});
 
-    if ( options_.get_str("SCF_TYPE") == "DF" ) {
+    if ( (options_.get_str("SCF_TYPE") == "DF" || options_.get_str("SCF_TYPE") == "DISK_DF" || options_.get_str("SCF_TYPE") == "MEM_DF") ) {
 
         // get auxiliary basis:
         std::shared_ptr<BasisSet> auxiliary = reference_wavefunction_->get_basisset("DF_BASIS_SCF");

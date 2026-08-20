@@ -61,7 +61,7 @@ void ThreeIndexIntegrals(std::shared_ptr<Wavefunction> ref, long int &nQ, long i
     // read integrals that were written to disk in the scf
     std::shared_ptr<PSIO> psio(new PSIO());
 
-    if ( ref->options().get_str("SCF_TYPE") == "DF" ) {
+    if ( (ref->options().get_str("SCF_TYPE") == "DF" || ref->options().get_str("SCF_TYPE") == "DISK_DF" || ref->options().get_str("SCF_TYPE") == "MEM_DF") ) {
         std::shared_ptr<BasisSet> primary = ref->basisset(); 
         std::shared_ptr<BasisSet> auxiliary = ref->get_basisset("DF_BASIS_SCF");
 

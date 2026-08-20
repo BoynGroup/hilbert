@@ -38,21 +38,41 @@ module focas_transform_driver
       implicit none
       real(wp) :: int2(:),int1(:),mo_coeff(:,:)
       integer :: error
+      real(wp) :: t0(2),t1(2)
+
+      focas_transform_oei_wall_ = 0.0_wp
+      focas_transform_tei_wall_ = 0.0_wp
+      focas_transform_mocoeff_wall_ = 0.0_wp
+      focas_transform_oei_cpu_ = 0.0_wp
+      focas_transform_tei_cpu_ = 0.0_wp
+      focas_transform_mocoeff_cpu_ = 0.0_wp
 
       ! 1-e integrals
+      t0 = timer()
       error = transform_oeints(int1)
+      t1 = timer()
+      focas_transform_oei_wall_ = t1(1) - t0(1)
+      focas_transform_oei_cpu_  = t1(2) - t0(2)
       if ( error /= 0 ) call abort_print(30)   
 
       ! 2-e integrals
+      t0 = timer()
       if ( df_vars_%use_df_teints == 0 ) then
         error = transform_teints(int2)
       else
         error = transform_teints_df(int2)
       end if
+      t1 = timer()
+      focas_transform_tei_wall_ = t1(1) - t0(1)
+      focas_transform_tei_cpu_  = t1(2) - t0(2)
       if ( error /= 0 ) call abort_print(31)
 
       ! mo_coeff matrix
+      t0 = timer()
       error = transform_mocoeff(mo_coeff)
+      t1 = timer()
+      focas_transform_mocoeff_wall_ = t1(1) - t0(1)
+      focas_transform_mocoeff_cpu_  = t1(2) - t0(2)
       if ( error /= 0 ) call abort_print(32)
 
       return

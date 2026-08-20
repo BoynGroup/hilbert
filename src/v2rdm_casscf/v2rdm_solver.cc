@@ -1,4570 +1,5519 @@
-/* 
+/*
  *  @BEGIN LICENSE
- * 
- *  Hilbert: a space for quantum chemistry plugins to Psi4 
- * 
+ *
+ *  Hilbert: a space for quantum chemistry plugins to Psi4
+ *
  *  Copyright (c) 2020 by its authors (LICENSE).
- * 
+ *
  *  The copyrights for code used from other parties are included in
  *  the corresponding files.
- * 
+ *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU Lesser General Public License as published by
  *  the Free Software Foundation, either version 3 of the License, or
  *  (at your option) any later version.
- * 
+ *
  *  This program is distributed in the hope that it will be useful,
  *  but WITHOUT ANY WARRANTY; without even the implied warranty of
  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  *  GNU Lesser General Public License for more details.
- * 
+ *
  *  You should have received a copy of the GNU Lesser General Public License
  *  along with this program.  If not, see http://www.gnu.org/licenses/.
- * 
+ *
  *  @END LICENSE
  */
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <math.h>
 
+#include <algorithm>
+#include <fstream>
+#include <limits>
+#include <map>
+#include <sstream>
+#include <string>
+#if defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>
+#endif
+
+#include <psi4/libiwl/iwl.h>
+#include <psi4/libmints/basisset.h>
+#include <psi4/libmints/factory.h>
+#include <psi4/libmints/local.h>
+#include <psi4/libmints/matrix.h>
 #include <psi4/libmints/mintshelper.h>
+#include <psi4/libmints/molecule.h>
+#include <psi4/libmints/vector.h>
+#include <psi4/libmints/wavefunction.h>
 #include <psi4/libmints/writer.h>
 #include <psi4/libmints/writer_file_prefix.h>
+#include <psi4/liboptions/liboptions.h>
+#include <psi4/libplugin/plugin.h>
+#include <psi4/libpsi4util/PsiOutStream.h>
+#include <psi4/libpsi4util/process.h>
+#include <psi4/libpsio/psio.hpp>
+#include <psi4/libqt/qt.h>
 #include <psi4/libtrans/integraltransform.h>
 #include <psi4/libtrans/mospace.h>
-#include <psi4/libplugin/plugin.h>
 #include <psi4/psi4-dec.h>
-#include <psi4/liboptions/liboptions.h>
-#include <psi4/libqt/qt.h>
-#include <psi4/libpsi4util/process.h>
-#include <psi4/libpsi4util/PsiOutStream.h>
-#include <psi4/libpsio/psio.hpp>
-#include <psi4/libmints/wavefunction.h>
 #include <psi4/psifiles.h>
-#include <psi4/libpsio/psio.hpp>
-#include <psi4/libmints/vector.h>
-#include <psi4/libmints/matrix.h>
-#include <psi4/libiwl/iwl.h>
-#include <psi4/libmints/local.h>
-#include <psi4/libmints/molecule.h>
-#include <psi4/libmints/factory.h>
-#include <psi4/libmints/basisset.h>
 
 #include "v2rdm_solver.h"
 
+#ifdef USING_PCMSolver
+#include <pybind11/pybind11.h>
+namespace py = pybind11;
+#endif
+
 #include <focas/focas_c_interface.h>
 #include <misc/blas.h>
-#include <misc/threeindexintegrals.h>
 #include <misc/omp.h>
+#include <misc/threeindexintegrals.h>
 
-#include<bpsdp_solver.h>
-#include<rrsdp_solver.h>
+#include <bpsdp_solver.h>
+#include <rrsdp_solver.h>
+#include "misc/cvxpy_solver.h"
+#include "misc/gpu_admm_solver.h"
 
-//#include <libsdp/bpsdp_solver.h>
-//#include <libsdp/rrsdp_solver.h>
+// #include <libsdp/bpsdp_solver.h>
+// #include <libsdp/rrsdp_solver.h>
 
 using namespace psi;
 using namespace fnocc;
 
 // diagonalize real, nonsymmetric matrix
-void NonsymmetricEigenvalue(long int N, double * A, double * VL, double * VR, double * WR, double *WI){
+void NonsymmetricEigenvalue(long int N, double *A, double *VL, double *VR,
+                            double *WR, double *WI) {
 
-    char JOBVL = 'V';
-    char JOBVR = 'V';
-    long int LDA  = N;
-    long int LDVL = N;
-    long int LDVR = N;
-    long int LWORK = 4*N;
-    double * WORK = (double*)malloc(LWORK*sizeof(double));
-    long int INFO;
+  char JOBVL = 'V';
+  char JOBVR = 'V';
+  long int LDA = N;
+  long int LDVL = N;
+  long int LDVR = N;
+  long int LWORK = 4 * N;
+  double *WORK = (double *)malloc(LWORK * sizeof(double));
+  long int INFO;
 
-    DGEEV(JOBVL, JOBVR, N, A, LDA, WR, WI, VL, LDVL, VR, LDVR, WORK, LWORK, INFO);
+  DGEEV(JOBVL, JOBVR, N, A, LDA, WR, WI, VL, LDVL, VR, LDVR, WORK, LWORK, INFO);
 
-    // kill complex eigenvalues
-    for (int i = 0; i < N; i++) {
-        if ( fabs(WI[i]) > 1e-6 ) {
-            WR[i] = 0.0;
-            WI[i] = 0.0;
-        }
+  // kill complex eigenvalues
+  for (int i = 0; i < N; i++) {
+    if (fabs(WI[i]) > 1e-6) {
+      WR[i] = 0.0;
+      WI[i] = 0.0;
     }
+  }
 
-    free(WORK);
+  free(WORK);
 }
 
-namespace hilbert{
+namespace hilbert {
 
-//static void evaluate_Au(SharedVector Au, SharedVector u, void * data) 
-static void evaluate_Au(double * Au, double * u, void * data) {
+thread_local long int v2RDMSolver::offset = 0;
 
-    // reinterpret void * as an instance of v2RDMSolver
-    v2RDMSolver* v2rdm = reinterpret_cast<v2RDMSolver*>(data);
-    v2rdm->bpsdp_Au(Au,u);
+static double available_host_memory_mib() {
+  std::ifstream meminfo("/proc/meminfo");
+  if (meminfo) {
+    std::string key;
+    double value_kib = 0.0;
+    std::string unit;
+    while (meminfo >> key >> value_kib >> unit) {
+      if (key == "MemAvailable:") {
+        return value_kib / 1024.0;
+      }
+    }
+  }
 
+#if defined(_SC_AVPHYS_PAGES) && defined(_SC_PAGESIZE)
+  const long pages = sysconf(_SC_AVPHYS_PAGES);
+  const long page_size = sysconf(_SC_PAGESIZE);
+  if (pages > 0 && page_size > 0) {
+    return (static_cast<double>(pages) * static_cast<double>(page_size)) /
+           (1024.0 * 1024.0);
+  }
+#endif
+
+  return 0.0;
 }
 
-//static void evaluate_ATu(SharedVector ATu, SharedVector u, void * data) 
-static void evaluate_ATu(double * ATu, double * u, void * data) {
+static double focas_df_c1_scratch_budget_mib(Options &options) {
+  const double psi4_memory_mib =
+      Process::environment.get_memory() / (1024.0 * 1024.0);
+  double effective_memory_mib = psi4_memory_mib;
 
-    // reinterpret void * as an instance of v2RDMSolver
-    v2RDMSolver* v2rdm = reinterpret_cast<v2RDMSolver*>(data);
-    v2rdm->bpsdp_ATu(ATu,u);
+  if (options.get_bool("ORBOPT_FOCAS_DF_C1_BLOCK_USE_AVAILABLE_MEMORY")) {
+    const double available_mib = available_host_memory_mib();
+    if (available_mib > 0.0) {
+      effective_memory_mib = std::min(effective_memory_mib, available_mib);
+    }
+  }
 
+  double fraction =
+      options.get_double("ORBOPT_FOCAS_DF_C1_BLOCK_MEMORY_FRACTION");
+  if (fraction < 0.0) {
+    fraction = 0.0;
+  }
+
+  return effective_memory_mib * fraction;
+}
+
+// The density-fitted FOCAS CUDA transform was originally exposed under
+// ORBOPT_FOCAS_DF_C1_CUDA* keywords, but the same CUDA kernel now drives the
+// transform for any point group (see transform_teints_df_sym_blocked in
+// focas_transform_teints.F90). The options were renamed to ORBOPT_FOCAS_DF_CUDA*;
+// the old C1 names are kept as deprecated aliases. Resolve the new keyword first
+// and honor the alias only when the user set the alias but not the new keyword.
+static bool focas_df_cuda_bool(Options &options, const char *new_key,
+                               const char *alias_key) {
+  if (!options[new_key].has_changed() && options[alias_key].has_changed())
+    return options.get_bool(alias_key);
+  return options.get_bool(new_key);
+}
+
+static int focas_df_cuda_int(Options &options, const char *new_key,
+                             const char *alias_key) {
+  if (!options[new_key].has_changed() && options[alias_key].has_changed())
+    return options.get_int(alias_key);
+  return options.get_int(new_key);
+}
+
+// static void evaluate_Au(SharedVector Au, SharedVector u, void * data)
+static void evaluate_Au(double *Au, double *u, void *data) {
+
+  // reinterpret void * as an instance of v2RDMSolver
+  v2RDMSolver *v2rdm = reinterpret_cast<v2RDMSolver *>(data);
+  v2rdm->bpsdp_Au(Au, u);
+}
+
+// static void evaluate_ATu(SharedVector ATu, SharedVector u, void * data)
+static void evaluate_ATu(double *ATu, double *u, void *data) {
+
+  // reinterpret void * as an instance of v2RDMSolver
+  v2RDMSolver *v2rdm = reinterpret_cast<v2RDMSolver *>(data);
+  v2rdm->bpsdp_ATu(ATu, u);
+}
+
+static bool build_sparse_A_dqg_callback(std::vector<int> &rows,
+                                        std::vector<int> &cols,
+                                        std::vector<double> &vals,
+                                        void *data) {
+  v2RDMSolver *v2rdm = reinterpret_cast<v2RDMSolver *>(data);
+  return v2rdm->build_sparse_A_dqg(rows, cols, vals);
+}
+
+static bool build_dqg_matrix_free_meta_callback(std::vector<int> &int_meta,
+                                                std::vector<double> &double_meta,
+                                                void *data) {
+  v2RDMSolver *v2rdm = reinterpret_cast<v2RDMSolver *>(data);
+  return v2rdm->build_dqg_matrix_free_meta(int_meta, double_meta);
 }
 
 // BPSDP monitor callback function
-static void bpsdp_monitor(int print_level, int oiter, int iiter, double energy_primal, double energy_dual, double mu, double primal_error, double dual_error, void * data) {
-    
-    if ( print_level > 0 ) {
-        if ( oiter % print_level == 0 ) {
-            outfile->Printf("      %5i %5i %11.6lf %11.6lf %11.6le %7.3lf %10.5le %10.5le\n",
-                oiter,iiter,energy_primal,energy_dual,fabs(energy_primal-energy_dual),mu,primal_error,dual_error);
-            fflush(stdout);
-        }
+static void bpsdp_monitor(int print_level, int oiter, int iiter,
+                          double energy_primal, double energy_dual, double mu,
+                          double primal_error, double dual_error, void *data) {
+
+  v2RDMSolver *v2rdm = reinterpret_cast<v2RDMSolver *>(data);
+  v2rdm->sdp_primal_error_ = primal_error;
+  v2rdm->sdp_dual_error_ = dual_error;
+
+  if (print_level > 0) {
+    if (oiter % print_level == 0) {
+      outfile->Printf(
+          "      %5i %5i %11.6lf %11.6lf %11.6le %7.3lf %10.5le %10.5le\n",
+          oiter, iiter, energy_primal, energy_dual,
+          fabs(energy_primal - energy_dual), mu, primal_error, dual_error);
+      fflush(stdout);
     }
-}       
+  }
+}
 
 // RRSDP monitor callback function
-static void rrsdp_monitor(int print_level, int oiter, int iiter, double lagrangian, double objective, double mu, double error, double zero, void * data) {
-    
-    if ( print_level > 0 ) {
-        if ( oiter % print_level == 0 ) {
-            outfile->Printf("    %12i %12i %12.6lf %12.6lf %12.2le %12.3le\n",
-                oiter,iiter,lagrangian,objective,mu,error);
-            fflush(stdout);
-        }
+static void rrsdp_monitor(int print_level, int oiter, int iiter,
+                          double lagrangian, double objective, double mu,
+                          double error, double zero, void *data) {
+
+  v2RDMSolver *v2rdm = reinterpret_cast<v2RDMSolver *>(data);
+  v2rdm->sdp_primal_error_ = error;
+  v2rdm->sdp_dual_error_ = error;
+
+  if (print_level > 0) {
+    if (oiter % print_level == 0) {
+      outfile->Printf("    %12i %12i %12.6lf %12.6lf %12.2le %12.3le\n", oiter,
+                      iiter, lagrangian, objective, mu, error);
+      fflush(stdout);
     }
+  }
 }
 
 // default constructor for molecular or hubbard hamiltonian
-v2RDMSolver::v2RDMSolver(SharedWavefunction reference_wavefunction,Options & options):
-    Wavefunction(options){
-    reference_wavefunction_ = reference_wavefunction;
-    is_external_hamiltonian_ = false;
-    common_init();
+v2RDMSolver::v2RDMSolver(SharedWavefunction reference_wavefunction,
+                         Options &options)
+    : Wavefunction(options) {
+  reference_wavefunction_ = reference_wavefunction;
+  is_external_hamiltonian_ = false;
+  common_init();
 }
 
 // constructor for externally-defined hamiltonian
-v2RDMSolver::v2RDMSolver(int nalpha, 
-                         int nbeta, 
-                         int nmo, 
-                         std::vector<double> h,
-                         std::vector<double> g,
-                         Options & options):
-    Wavefunction(options){
+v2RDMSolver::v2RDMSolver(int nalpha, int nbeta, int nmo, std::vector<double> h,
+                         std::vector<double> g, Options &options)
+    : Wavefunction(options) {
 
-    nalpha_ = nalpha;
-    nbeta_  = nbeta;
-    nmo_    = nmo;
-    nso_    = nmo;
+  nalpha_ = nalpha;
+  nbeta_ = nbeta;
+  nmo_ = nmo;
+  nso_ = nmo;
 
-    is_external_hamiltonian_ = true;
+  is_external_hamiltonian_ = true;
 
-    common_init();
+  common_init();
 
-    // copy integrals into place (assuming c1 symmetry)
-    double * c_p = c->pointer();
-    for (int i = 0; i < amo_; i++) {
-        for (int j = 0; j < amo_; j++) {
-            c_p[d1aoff[0] + i * amo_ + j] = h[i*amo_+j];
-            c_p[d1boff[0] + i * amo_ + j] = h[i*amo_+j];
-        }
+  // copy integrals into place (assuming c1 symmetry)
+  double *c_p = c->pointer();
+  for (int i = 0; i < amo_; i++) {
+    for (int j = 0; j < amo_; j++) {
+      c_p[d1aoff[0] + i * amo_ + j] = h[i * amo_ + j];
+      c_p[d1boff[0] + i * amo_ + j] = h[i * amo_ + j];
     }
-    for (int ij = 0; ij < gems_ab[0]; ij++) {
-        int i = bas_ab_sym[0][ij][0];
-        int j = bas_ab_sym[0][ij][1];
-        for (int kl = 0; kl < gems_ab[0]; kl++) {
-            int k = bas_ab_sym[0][kl][0];
-            int l = bas_ab_sym[0][kl][1];
-            // (ik|jl) > <ij|kl>
-            c_p[d2aboff[0] + ij * gems_ab[0] + kl] = g[i*amo_*amo_*amo_+k*amo_*amo_+j*amo_+l];
-        }
+  }
+  for (int ij = 0; ij < gems_ab[0]; ij++) {
+    int i = bas_ab_sym[0][ij][0];
+    int j = bas_ab_sym[0][ij][1];
+    for (int kl = 0; kl < gems_ab[0]; kl++) {
+      int k = bas_ab_sym[0][kl][0];
+      int l = bas_ab_sym[0][kl][1];
+      // (ik|jl) > <ij|kl>
+      c_p[d2aboff[0] + ij * gems_ab[0] + kl] =
+          g[i * amo_ * amo_ * amo_ + k * amo_ * amo_ + j * amo_ + l];
     }
-    for (int ij = 0; ij < gems_aa[0]; ij++) {
-        int i = bas_aa_sym[0][ij][0];
-        int j = bas_aa_sym[0][ij][1];
-        for (int kl = 0; kl < gems_aa[0]; kl++) {
-            int k = bas_aa_sym[0][kl][0];
-            int l = bas_aa_sym[0][kl][1];
-            // (ik|jl)-(il|jk) > <ij||kl>
-            double val =  g[i*amo_*amo_*amo_+k*amo_*amo_+j*amo_+l] - g[i*amo_*amo_*amo_+l*amo_*amo_+j*amo_+k];
-            c_p[d2aaoff[0] + ij * gems_aa[0] + kl] = val;
-            c_p[d2bboff[0] + ij * gems_aa[0] + kl] = val;
-        }
+  }
+  for (int ij = 0; ij < gems_aa[0]; ij++) {
+    int i = bas_aa_sym[0][ij][0];
+    int j = bas_aa_sym[0][ij][1];
+    for (int kl = 0; kl < gems_aa[0]; kl++) {
+      int k = bas_aa_sym[0][kl][0];
+      int l = bas_aa_sym[0][kl][1];
+      // (ik|jl)-(il|jk) > <ij||kl>
+      double val = g[i * amo_ * amo_ * amo_ + k * amo_ * amo_ + j * amo_ + l] -
+                   g[i * amo_ * amo_ * amo_ + l * amo_ * amo_ + j * amo_ + k];
+      c_p[d2aaoff[0] + ij * gems_aa[0] + kl] = val;
+      c_p[d2bboff[0] + ij * gems_aa[0] + kl] = val;
     }
-
+  }
 }
 
-v2RDMSolver::~v2RDMSolver()
-{
-    free(tei_full_sym_);
-    free(oei_full_sym_);
-    free(d2_plus_core_sym_);
-    free(d1_act_spatial_sym_);
+v2RDMSolver::~v2RDMSolver() {
+  free(tei_full_sym_);
+  free(oei_full_sym_);
+  free(d2_plus_core_sym_);
+  free(d1_act_spatial_sym_);
 
-    free(amopi_);
-    free(rstcpi_);
-    free(rstvpi_);
-    free(d2aboff);
-    free(d2aaoff);
-    free(d2bboff);
-    free(d1aoff);
-    free(d1boff);
-    free(q1aoff);
-    free(q1boff);
-    if ( constrain_q2_ ) {
-        free(q2aboff);
-        free(q2aaoff);
-        free(q2bboff);
-    }
-    if ( constrain_g2_ ) {
-        free(g2aboff);
-        free(g2baoff);
-        free(g2aaoff);
-    }
-    if ( constrain_t1_ ) {
-        free(t1aaboff);
-        free(t1bbaoff);
-        free(t1aaaoff);
-        free(t1bbboff);
-    }
-    if ( constrain_t2_ ) {
-        free(t2aaboff);
-        free(t2bbaoff);
-        free(t2aaaoff);
-        free(t2bbboff);
-    }
-    if ( constrain_e3_ ) {
-        free(e3aaboff);
-        free(e3bbaoff);
-        free(e3aaaoff);
-        free(e3bbboff);
-    }
-    if ( constrain_f3_ ) {
-        free(f3aaboff);
-        free(f3bbaoff);
-        free(f3aaaoff);
-        free(f3bbboff);
-    }
-    if ( constrain_q3_ ) {
-        free(q3aaaoff);
-        free(q3bbboff);
-        free(q3aaboff);
-        free(q3bbaoff);
-    }
-    if ( constrain_d3_ ) {
-        free(d3aaaoff);
-        free(d3bbboff);
-        free(d3aaboff);
-        free(d3bbaoff);
-    }
-    if ( constrain_d4_ ) {
-        free(d4aaaaoff);
-        free(d4aaaboff);
-        free(d4aabboff);
-        free(d4bbbaoff);
-        free(d4bbbboff);
-    }
+  free(amopi_);
+  free(rstcpi_);
+  free(rstvpi_);
+  free(d2aboff);
+  free(d2aaoff);
+  free(d2bboff);
+  free(d1aoff);
+  free(d1boff);
+  free(q1aoff);
+  free(q1boff);
+  if (constrain_q2_) {
+    free(q2aboff);
+    free(q2aaoff);
+    free(q2bboff);
+  }
+  if (constrain_g2_) {
+    free(g2aboff);
+    free(g2baoff);
+    free(g2aaoff);
+  }
+  if (constrain_t1_) {
+    free(t1aaboff);
+    free(t1bbaoff);
+    free(t1aaaoff);
+    free(t1bbboff);
+  }
+  if (constrain_t2_) {
+    free(t2aaboff);
+    free(t2bbaoff);
+    free(t2aaaoff);
+    free(t2bbboff);
+  }
+  if (constrain_e3_) {
+    free(e3aaboff);
+    free(e3bbaoff);
+    free(e3aaaoff);
+    free(e3bbboff);
+  }
+  if (constrain_f3_) {
+    free(f3aaboff);
+    free(f3bbaoff);
+    free(f3aaaoff);
+    free(f3bbboff);
+  }
+  if (constrain_q3_) {
+    free(q3aaaoff);
+    free(q3bbboff);
+    free(q3aaboff);
+    free(q3bbaoff);
+  }
+  if (constrain_d3_) {
+    free(d3aaaoff);
+    free(d3bbboff);
+    free(d3aaboff);
+    free(d3bbaoff);
+  }
+  if (constrain_d4_) {
+    free(d4aaaaoff);
+    free(d4aaaboff);
+    free(d4aabboff);
+    free(d4bbbaoff);
+    free(d4bbbboff);
+  }
 
-    free(X_);
-
+  free(X_);
 }
 
-void  v2RDMSolver::common_init(){
+void v2RDMSolver::common_init() {
 
-    outfile->Printf("\n\n");
-    outfile->Printf( "        ****************************************************\n");
-    outfile->Printf( "        *                                                  *\n");
-    outfile->Printf( "        *    v2RDM-CASSCF                                  *\n");
-    outfile->Printf( "        *                                                  *\n");
-    outfile->Printf( "        *    A variational 2-RDM-driven approach to the    *\n");
-    outfile->Printf( "        *    active space self-consistent field method     *\n");
-    outfile->Printf( "        *                                                  *\n");
-    outfile->Printf( "        ****************************************************\n");
+  outfile->Printf("\n\n");
+  outfile->Printf(
+      "        ****************************************************\n");
+  outfile->Printf(
+      "        *                                                  *\n");
+  outfile->Printf(
+      "        *    v2RDM-CASSCF                                  *\n");
+  outfile->Printf(
+      "        *                                                  *\n");
+  outfile->Printf(
+      "        *    A variational 2-RDM-driven approach to the    *\n");
+  outfile->Printf(
+      "        *    active space self-consistent field method     *\n");
+  outfile->Printf(
+      "        *                                                  *\n");
+  outfile->Printf(
+      "        ****************************************************\n");
 
-    outfile->Printf("\n");
-    outfile->Printf("\n");
-    outfile->Printf("        The following papers should be cited when using v2RDM-CASSCF:\n");
-    outfile->Printf("\n");
-    outfile->Printf("        J. Fosso-Tande, D. R. Nascimento, and A. E. DePrince III,\n");
-    outfile->Printf("        Mol. Phys. 114, 423-430 (2015).\n");
-    outfile->Printf("\n");
-    outfile->Printf("            URL: http://dx.doi.org/10.1080/00268976.2015.1078008\n");
-    outfile->Printf("\n");
-    outfile->Printf("        J. Fosso-Tande, T.-S. Nguyen, G. Gidofalvi, and\n");
-    outfile->Printf("        A. E. DePrince III, J. Chem. Theory Comput. 12, 2260-2271 (2016).\n");
-    outfile->Printf("\n");
-    outfile->Printf("            URL: http://dx.doi.org/10.1021/acs.jctc.6b00190\n");
-    outfile->Printf("\n");
-    outfile->Printf("\n");
+  outfile->Printf("\n");
+  outfile->Printf("\n");
+  outfile->Printf("        The following papers should be cited when using "
+                  "v2RDM-CASSCF:\n");
+  outfile->Printf("\n");
+  outfile->Printf(
+      "        J. Fosso-Tande, D. R. Nascimento, and A. E. DePrince III,\n");
+  outfile->Printf("        Mol. Phys. 114, 423-430 (2015).\n");
+  outfile->Printf("\n");
+  outfile->Printf(
+      "            URL: http://dx.doi.org/10.1080/00268976.2015.1078008\n");
+  outfile->Printf("\n");
+  outfile->Printf("        J. Fosso-Tande, T.-S. Nguyen, G. Gidofalvi, and\n");
+  outfile->Printf("        A. E. DePrince III, J. Chem. Theory Comput. 12, "
+                  "2260-2271 (2016).\n");
+  outfile->Printf("\n");
+  outfile->Printf(
+      "            URL: http://dx.doi.org/10.1021/acs.jctc.6b00190\n");
+  outfile->Printf("\n");
+  outfile->Printf("\n");
 
-    is_hubbard_ = options_.get_bool("HUBBARD_HAMILTONIAN");
+  is_hubbard_ = options_.get_bool("HUBBARD_HAMILTONIAN");
 
-    outfile->Printf("\n");
-    outfile->Printf("  ==> Hamiltonian type <==\n");
-    outfile->Printf("\n");
-    if ( is_hubbard_ ) {
-        outfile->Printf("        Hubbard\n");
-    }else if ( is_external_hamiltonian_ ) {
-        outfile->Printf("        externally-defined\n");
-    }else {
-        outfile->Printf("        molecular\n");
-    }
-    //outfile->Printf("        %s\n",is_hubbard_ ? "Hubbard" : "molecular");
+#ifdef USING_PCMSolver
+  E_pcm_ = 0.0;
+  Tr_D_Vpcm_ = 0.0;
+#endif
 
-    outfile->Printf("\n");
-    outfile->Printf("  ==> Convergence parameters <==\n");
-    outfile->Printf("\n");
-    outfile->Printf("        r_convergence:                      %5.3le\n",options_.get_double("R_CONVERGENCE"));
-    outfile->Printf("        e_convergence:                      %5.3le\n",options_.get_double("E_CONVERGENCE"));
-    outfile->Printf("        cg_convergence:                     %5.3le\n",options_.get_double("CG_CONVERGENCE"));
-    outfile->Printf("        maxiter:                             %8i\n",options_.get_int("MAXITER"));
-    outfile->Printf("        cg_maxiter:                          %8i\n",options_.get_int("CG_MAXITER"));
-    outfile->Printf("        scf_maxiter:                         %8i\n",options_.get_int("SCF_MAXITER"));
-    outfile->Printf("\n");
+  outfile->Printf("\n");
+  outfile->Printf("  ==> Hamiltonian type <==\n");
+  outfile->Printf("\n");
+  if (is_hubbard_) {
+    outfile->Printf("        Hubbard\n");
+  } else if (is_external_hamiltonian_) {
+    outfile->Printf("        externally-defined\n");
+  } else {
+    outfile->Printf("        molecular\n");
+  }
+  // outfile->Printf("        %s\n",is_hubbard_ ? "Hubbard" : "molecular");
 
-    is_df_ = false;
-    if ( options_.get_str("SCF_TYPE") == "DF" || options_.get_str("SCF_TYPE") == "CD" ) {
-        is_df_ = true;
-    }
+  outfile->Printf("\n");
+  outfile->Printf("  ==> Convergence parameters <==\n");
+  outfile->Printf("\n");
+  outfile->Printf("        r_convergence:                      %5.3le\n",
+                  options_.get_double("R_CONVERGENCE"));
+  outfile->Printf("        e_convergence:                      %5.3le\n",
+                  options_.get_double("E_CONVERGENCE"));
+  outfile->Printf("        cg_convergence:                     %5.3le\n",
+                  options_.get_double("CG_CONVERGENCE"));
+  outfile->Printf("        maxiter:                             %8i\n",
+                  options_.get_int("MAXITER"));
+  outfile->Printf("        cg_maxiter:                          %8i\n",
+                  options_.get_int("CG_MAXITER"));
+  outfile->Printf("        scf_maxiter:                         %8i\n",
+                  options_.get_int("SCF_MAXITER"));
+  outfile->Printf("\n");
 
-    // initialization depends on hamiltonian type
-    if ( is_hubbard_ ) {
+  is_df_ = false;
+  if ((options_.get_str("SCF_TYPE") == "DF" ||
+       options_.get_str("SCF_TYPE") == "DISK_DF" ||
+       options_.get_str("SCF_TYPE") == "MEM_DF") ||
+      options_.get_str("SCF_TYPE") == "CD") {
+    is_df_ = true;
+  }
 
-        initialize_with_hubbard_hamiltonian();
+  // initialization depends on hamiltonian type
+  if (is_hubbard_) {
 
-    }else if ( is_external_hamiltonian_ ) {
+    initialize_with_hubbard_hamiltonian();
 
-        initialize_with_external_hamiltonian();
+  } else if (is_external_hamiltonian_) {
 
-    }else {
+    initialize_with_external_hamiltonian();
 
-        initialize_with_molecular_hamiltonian();
+  } else {
 
-    }
-    
-    //if ( options_.get_bool("EXTENDED_KOOPMANS") && options_.get_bool("NAT_ORBS") ) {
-    //    throw PsiException("EKT does not work with natural orbitals",__FILE__,__LINE__);
-    //}
-    //if ( options_.get_bool("EXTENDED_KOOPMANS") && options_.get_bool("FCIDUMP") ) {
-    //    throw PsiException("EKT does not work with natural orbitals (triggered by FCIDUMP=true)",__FILE__,__LINE__);
-    //}
+    initialize_with_molecular_hamiltonian();
+  }
 
-    // allocate vectors
-    x      = SharedVector(new Vector("primal solution",n_primal_));
-    c      = SharedVector(new Vector("OEI and TEI",n_primal_));
-    b      = SharedVector(new Vector("constraints",n_dual_));
+  // if ( options_.get_bool("EXTENDED_KOOPMANS") &&
+  // options_.get_bool("NAT_ORBS") ) {
+  //     throw PsiException("EKT does not work with natural
+  //     orbitals",__FILE__,__LINE__);
+  // }
+  // if ( options_.get_bool("EXTENDED_KOOPMANS") && options_.get_bool("FCIDUMP")
+  // ) {
+  //     throw PsiException("EKT does not work with natural orbitals (triggered
+  //     by FCIDUMP=true)",__FILE__,__LINE__);
+  // }
 
-    // input/output array for orbopt sweeps
+  // allocate vectors (64-bit BigVector: psi4::Vector's int dimension overflows
+  // when n_dual_ > INT_MAX, e.g. amo>=118 for C1 where n_dual_ ~ 2.4e9)
+  x = std::make_shared<BigVector>("primal solution", n_primal_);
+  c = std::make_shared<BigVector>("OEI and TEI", n_primal_);
+  b = std::make_shared<BigVector>("constraints", n_dual_);
 
-    int nthread = omp_get_max_threads();
+  // input/output array for orbopt sweeps
 
-    bool do_act_act = options_.get_bool("ORBOPT_ACTIVE_ACTIVE_ROTATIONS");
+  int nthread = omp_get_max_threads();
 
-    orbopt_data_    = (double*)malloc(15*sizeof(double));
-    orbopt_data_[0] = (double)nthread;
-    orbopt_data_[1] = (double)(do_act_act ? 1.0 : 0.0 );
-    orbopt_data_[2] = (double)nfrzc_; //(double)options_.get_int("ORBOPT_FROZEN_CORE");
-    orbopt_data_[3] = (double)options_.get_double("ORBOPT_GRADIENT_CONVERGENCE");
-    orbopt_data_[4] = (double)options_.get_double("ORBOPT_ENERGY_CONVERGENCE");
-    orbopt_data_[5] = (double)(options_.get_bool("ORBOPT_WRITE") ? 1.0 : 0.0 );
-    orbopt_data_[6] = (double)(options_.get_bool("ORBOPT_EXACT_DIAGONAL_HESSIAN") ? 1.0 : 0.0 );
-    orbopt_data_[7] = (double)options_.get_int("ORBOPT_NUM_DIIS_VECTORS");
-    orbopt_data_[8] = (double)options_.get_int("ORBOPT_MAXITER");
-    orbopt_data_[9] = 0.0;
-    if ( is_df_ ) {
-      orbopt_data_[9] = 1.0;
-    }
-    orbopt_data_[10] = 0.0;  // number of iterations (output)
-    orbopt_data_[11] = 0.0;  // gradient norm (output)
-    orbopt_data_[12] = 0.0;  // change in energy (output)
-    orbopt_data_[13] = 0.0;  // converged?
+  bool do_act_act = options_.get_bool("ORBOPT_ACTIVE_ACTIVE_ROTATIONS");
 
-    // orbital optimizatoin algorithm
-    //orbopt_data_[14] = 0.0;
-    //if      ( options_.get_str("ORBOPT_ALGORITHM") == "QUASI_NEWTON" )       orbopt_data_[14] = 0.0;
-    //else if ( options_.get_str("ORBOPT_ALGORITHM") == "CONJUGATE_GRADIENT" ) orbopt_data_[14] = 1.0;
-    //else if ( options_.get_str("ORBOPT_ALGORITHM") == "NEWTON_RAPHSON" )     orbopt_data_[14] = 2.0;
-    // orbital optimizatoin algorithm
+  orbopt_data_ = (double *)malloc(25 * sizeof(double));
+  orbopt_data_[0] = (double)nthread;
+  orbopt_data_[1] = (double)(do_act_act ? 1.0 : 0.0);
+  orbopt_data_[2] =
+      (double)nfrzc_; //(double)options_.get_int("ORBOPT_FROZEN_CORE");
+  orbopt_data_[3] = (double)options_.get_double("ORBOPT_GRADIENT_CONVERGENCE");
+  orbopt_data_[4] = (double)options_.get_double("ORBOPT_ENERGY_CONVERGENCE");
+  orbopt_data_[5] = (double)(options_.get_bool("ORBOPT_WRITE") ? 1.0 : 0.0);
+  orbopt_data_[6] =
+      (double)(options_.get_bool("ORBOPT_EXACT_DIAGONAL_HESSIAN") ? 1.0 : 0.0);
+  orbopt_data_[7] = (double)options_.get_int("ORBOPT_NUM_DIIS_VECTORS");
+  orbopt_data_[8] = (double)options_.get_int("ORBOPT_MAXITER");
+  orbopt_data_[9] = 0.0;
+  if (is_df_) {
+    orbopt_data_[9] = 1.0;
+  }
+  orbopt_data_[10] = 0.0; // number of iterations (output)
+  orbopt_data_[11] = 0.0; // gradient norm (output)
+  orbopt_data_[12] = 0.0; // change in energy (output)
+  orbopt_data_[13] = 0.0; // converged?
+
+  // orbital optimizatoin algorithm
+  // orbopt_data_[14] = 0.0;
+  // if      ( options_.get_str("ORBOPT_ALGORITHM") == "QUASI_NEWTON" )
+  // orbopt_data_[14] = 0.0; else if ( options_.get_str("ORBOPT_ALGORITHM") ==
+  // "CONJUGATE_GRADIENT" ) orbopt_data_[14] = 1.0; else if (
+  // options_.get_str("ORBOPT_ALGORITHM") == "NEWTON_RAPHSON" ) orbopt_data_[14]
+  // = 2.0;
+  // orbital optimizatoin algorithm
+  orbopt_data_[14] = 3.0;
+  if (options_.get_str("ORBOPT_ALGORITHM") == "STEEPEST_DESCENT")
+    orbopt_data_[14] = 0.0;
+  else if (options_.get_str("ORBOPT_ALGORITHM") == "HESTENES_STIEFEL")
+    orbopt_data_[14] = 1.0;
+  else if (options_.get_str("ORBOPT_ALGORITHM") == "DAI_YUAN")
+    orbopt_data_[14] = 2.0;
+  else if (options_.get_str("ORBOPT_ALGORITHM") == "HAGER_ZHANG")
     orbopt_data_[14] = 3.0;
-    if      ( options_.get_str("ORBOPT_ALGORITHM") == "STEEPEST_DESCENT" ) orbopt_data_[14] = 0.0;
-    else if ( options_.get_str("ORBOPT_ALGORITHM") == "HESTENES_STIEFEL" ) orbopt_data_[14] = 1.0;
-    else if ( options_.get_str("ORBOPT_ALGORITHM") == "DAI_YUAN" )         orbopt_data_[14] = 2.0;
-    else if ( options_.get_str("ORBOPT_ALGORITHM") == "HAGER_ZHANG" )      orbopt_data_[14] = 3.0;
-    else if ( options_.get_str("ORBOPT_ALGORITHM") == "KOU_DAI" )          orbopt_data_[14] = 4.0;
+  else if (options_.get_str("ORBOPT_ALGORITHM") == "KOU_DAI")
+    orbopt_data_[14] = 4.0;
+  orbopt_data_[15] =
+      (double)(options_.get_bool("ORBOPT_FOCAS_STEP_MEMORY") ? 1.0 : 0.0);
+  orbopt_data_[16] =
+      (double)(options_.get_bool("ORBOPT_FOCAS_DF_C1_BLOCKED") ? 1.0 : 0.0);
+  orbopt_data_[17] = (double)options_.get_int("ORBOPT_FOCAS_DF_C1_BLOCK_Q");
+  orbopt_data_[18] = focas_df_c1_scratch_budget_mib(options_);
+  orbopt_data_[19] =
+      (double)options_.get_int("ORBOPT_FOCAS_DF_C1_BLOCK_Q_MAX");
+  orbopt_data_[20] =
+      (double)options_.get_double("ORBOPT_FOCAS_STEP_INCREASE_FACTOR");
+  orbopt_data_[21] =
+      (double)(focas_df_cuda_bool(options_, "ORBOPT_FOCAS_DF_CUDA",
+                                  "ORBOPT_FOCAS_DF_C1_CUDA") ? 1.0 : 0.0);
+  orbopt_data_[22] =
+      (double)(focas_df_cuda_bool(options_, "ORBOPT_FOCAS_DF_CUDA_VALIDATE",
+                                  "ORBOPT_FOCAS_DF_C1_CUDA_VALIDATE") ? 1.0
+                                                                      : 0.0);
+  orbopt_data_[23] =
+      (double)focas_df_cuda_int(options_, "ORBOPT_FOCAS_DF_CUDA_NUM_GPUS",
+                                "ORBOPT_FOCAS_DF_C1_CUDA_NUM_GPUS");
+  orbopt_data_[24] =
+      (double)(focas_df_cuda_bool(options_, "ORBOPT_FOCAS_DF_CUDA_VERBOSE",
+                                  "ORBOPT_FOCAS_DF_C1_CUDA_VERBOSE") ? 1.0
+                                                                     : 0.0);
 
-    scf_maxiter_ = options_.get_int("SCF_MAXITER");
+  scf_maxiter_ = options_.get_int("SCF_MAXITER");
 
-    orbopt_converged_ = false;
+  orbopt_converged_ = false;
 
-    // don't change the length of this filename
-    orbopt_outfile_ = (char*)malloc(120*sizeof(char));
+  // don't change the length of this filename
+  orbopt_outfile_ = (char *)malloc(120 * sizeof(char));
 
-    if ( !is_external_hamiltonian_) {
+  if (!is_external_hamiltonian_) {
 
-        std::string filename = get_writer_file_prefix(reference_wavefunction_->molecule()->name()) + ".orbopt";
-        strcpy(orbopt_outfile_,filename.c_str());
-        if ( options_.get_bool("ORBOPT_WRITE") ) {
-            FILE * fp = fopen(orbopt_outfile_,"w");
-            fclose(fp);
-        }
-
+    std::string filename =
+        get_writer_file_prefix(reference_wavefunction_->molecule()->name()) +
+        ".orbopt";
+    strcpy(orbopt_outfile_, filename.c_str());
+    if (options_.get_bool("ORBOPT_WRITE")) {
+      FILE *fp = fopen(orbopt_outfile_, "w");
+      fclose(fp);
     }
+  }
 
-    // initialize timers and iteration counters
-    orbopt_iter_total_ = 0;
-    orbopt_time_       = 0.0;
+  // initialize timers and iteration counters
+  orbopt_iter_total_ = 0;
+  orbopt_time_ = 0.0;
 
-    // initialize orbopt_ class (but not for externally-obtained hamiltonians)
-    if ( !is_external_hamiltonian_ ) {
-        orbopt_ = (std::shared_ptr<OrbitalOptimizer>)(new OrbitalOptimizer(reference_wavefunction_,options_));
-    }
+  // initialize orbopt_ class (but not for externally-obtained hamiltonians)
+  if (!is_external_hamiltonian_) {
+    orbopt_ = (std::shared_ptr<OrbitalOptimizer>)(new OrbitalOptimizer(
+        reference_wavefunction_, options_));
+  }
 
-    // allocate memory for orbital lagrangian (TODO: make these smaller)
-    X_               = (double*)malloc(nmo_*nmo_*sizeof(double));
+  // allocate memory for orbital lagrangian (TODO: make these smaller)
+  X_ = (double *)malloc(nmo_ * nmo_ * sizeof(double));
 
-    // even if we use rhf/rohf reference, we need same_a_b_orbs_=false
-    // to trigger the correct integral transformations in deriv.cc
-    same_a_b_orbs_ = false;
-    same_a_b_dens_ = false;
+  // even if we use rhf/rohf reference, we need same_a_b_orbs_=false
+  // to trigger the correct integral transformations in deriv.cc
+  same_a_b_orbs_ = false;
+  same_a_b_dens_ = false;
 
-    // sdp solver
+  // sdp solver
 
-    if ( options_.get_str("SDP_SOLVER") == "BPSDP" ) {
+  if (options_.get_str("SDP_SOLVER") == "BPSDP") {
 
-        libsdp::SDPOptions sdp_options;
-        sdp_options.sdp_objective_convergence = options_.get_double("E_CONVERGENCE");
-        sdp_options.sdp_error_convergence     = options_.get_double("R_CONVERGENCE");
-        sdp_options.cg_convergence            = options_.get_double("CG_CONVERGENCE");
-        sdp_options.cg_maxiter                = options_.get_int("CG_MAXITER");
-        sdp_options.maxiter                   = options_.get_int("MAXITER");
+    libsdp::SDPOptions sdp_options;
+    sdp_options.sdp_objective_convergence =
+        options_.get_double("E_CONVERGENCE");
+    sdp_options.sdp_error_convergence = options_.get_double("R_CONVERGENCE");
+    sdp_options.cg_convergence = options_.get_double("CG_CONVERGENCE");
+    sdp_options.cg_maxiter = options_.get_int("CG_MAXITER");
+    sdp_options.maxiter = options_.get_int("MAXITER");
 
-        sdp_ = (std::shared_ptr<libsdp::SDPSolver>)(new libsdp::BPSDPSolver(n_primal_,n_dual_,sdp_options));
+    sdp_ = (std::shared_ptr<libsdp::SDPSolver>)(new libsdp::BPSDPSolver(
+        n_primal_, n_dual_, sdp_options));
 
-    }else if ( options_.get_str("SDP_SOLVER") == "RRSDP" ) {
+  } else if (options_.get_str("SDP_SOLVER") == "RRSDP") {
 
-        libsdp::SDPOptions sdp_options;
-        sdp_options.sdp_objective_convergence = options_.get_double("E_CONVERGENCE");
-        sdp_options.sdp_error_convergence     = options_.get_double("R_CONVERGENCE");
-        sdp_options.maxiter                   = options_.get_int("MAXITER");
+    libsdp::SDPOptions sdp_options;
+    sdp_options.sdp_objective_convergence =
+        options_.get_double("E_CONVERGENCE");
+    sdp_options.sdp_error_convergence = options_.get_double("R_CONVERGENCE");
+    sdp_options.maxiter = options_.get_int("MAXITER");
 
-        sdp_ = (std::shared_ptr<libsdp::SDPSolver>)(new libsdp::RRSDPSolver(n_primal_,n_dual_,sdp_options));
+    sdp_ = (std::shared_ptr<libsdp::SDPSolver>)(new libsdp::RRSDPSolver(
+        n_primal_, n_dual_, sdp_options));
 
-    }else {
+  } else if (options_.get_str("SDP_SOLVER") == "CVXPY") {
 
-        throw PsiException("unknown SDP_SOLVER",__FILE__,__LINE__);
-    }
+    libsdp::SDPOptions sdp_options;
+    sdp_options.sdp_objective_convergence =
+        options_.get_double("E_CONVERGENCE");
+    sdp_options.sdp_error_convergence = options_.get_double("R_CONVERGENCE");
+    sdp_options.maxiter = options_.get_int("MAXITER");
 
+    std::string cvxpy_sol = options_.get_str("CVXPY_SOLVER");
+    sdp_ = (std::shared_ptr<libsdp::SDPSolver>)(new libsdp::CVXPYSolver(
+        n_primal_, n_dual_, sdp_options, cvxpy_sol));
+
+  } else if (options_.get_str("SDP_SOLVER") == "GPU_ADMM") {
+
+    libsdp::SDPOptions sdp_options;
+    sdp_options.sdp_objective_convergence =
+        options_.get_double("E_CONVERGENCE");
+    sdp_options.sdp_error_convergence = options_.get_double("R_CONVERGENCE");
+    sdp_options.cg_convergence = options_.get_double("CG_CONVERGENCE");
+    sdp_options.cg_maxiter = options_.get_int("CG_MAXITER");
+    sdp_options.maxiter = options_.get_int("MAXITER");
+    sdp_options.mu_update_frequency = options_.get_int("MU_UPDATE_FREQUENCY");
+
+    // Convergence options forwarded to the Python GPU-ADMM solver
+    // (over-relaxation, relative gap, energy-stagnation stop).
+    std::map<std::string, double> accel_opts;
+    accel_opts["relaxation"] = options_.get_double("GPU_ADMM_RELAXATION");
+    accel_opts["gap_relative"] =
+        options_.get_bool("GPU_ADMM_GAP_RELATIVE") ? 1.0 : 0.0;
+    accel_opts["gap_relative_tol"] =
+        options_.get_double("GPU_ADMM_GAP_RELATIVE_TOL");
+    accel_opts["stagnation_window"] =
+        options_.get_int("GPU_ADMM_STAGNATION_WINDOW");
+    accel_opts["stagnation_energy_tol"] =
+        options_.get_double("GPU_ADMM_STAGNATION_ENERGY_TOL");
+
+    sdp_ = (std::shared_ptr<libsdp::SDPSolver>)(new libsdp::GPUADMMSolver(
+        n_primal_, n_dual_, sdp_options, build_sparse_A_dqg_callback,
+        build_dqg_matrix_free_meta_callback,
+        options_.get_bool("GPU_ADMM_VALIDATE_A"),
+        options_.get_bool("GPU_ADMM_PROFILE"),
+        options_.get_bool("GPU_ADMM_MATRIX_FREE"),
+        options_.get_bool("GPU_ADMM_MATRIX_FREE_VALIDATE"),
+        options_.get_bool("GPU_ADMM_MATRIX_FREE_AT_CSR"),
+        options_.get_bool("GPU_ADMM_MATRIX_FREE_CUDA_AU"),
+        options_.get_bool("GPU_ADMM_MATRIX_FREE_CUDA_ATU"),
+        options_.get_bool("GPU_ADMM_CUDA_VERBOSE"),
+        options_.get_bool("GPU_ADMM_VALIDATE_AURANGE"),
+        options_.get_double("GPU_ADMM_CG_DYNAMIC_FACTOR"),
+        options_.get_bool("GPU_ADMM_CG_FUSED_NORMAL"),
+        options_.get_bool("GPU_ADMM_SHARD_PRIMAL"),
+        options_.get_bool("GPU_ADMM_SHARD_PRIMAL_STORE"),
+        options_.get_bool("GPU_ADMM_PSD_MULTI_GPU"),
+        options_.get_str("GPU_ADMM_PSD_DEVICES"),
+        options_.get_double("GPU_ADMM_PSD_BASE_MEMORY_FRACTION"),
+        options_.get_double("GPU_ADMM_PSD_WORKSPACE_SCALE"),
+        options_.get_bool("GPU_ADMM_PSD_AVOID_BASE_LARGE_BLOCKS"),
+        accel_opts));
+
+  } else {
+
+    throw PsiException("unknown SDP_SOLVER", __FILE__, __LINE__);
+  }
 }
 
 void v2RDMSolver::initialize_with_molecular_hamiltonian() {
 
-    shallow_copy(reference_wavefunction_);
+  shallow_copy(reference_wavefunction_);
 
-    escf_     = reference_wavefunction_->energy();
-    nalpha_   = reference_wavefunction_->nalpha();
-    nbeta_    = reference_wavefunction_->nbeta();
+  escf_ = reference_wavefunction_->energy();
+  nalpha_ = reference_wavefunction_->nalpha();
+  nbeta_ = reference_wavefunction_->nbeta();
 
-    nalphapi_ = reference_wavefunction_->nalphapi();
-    nbetapi_  = reference_wavefunction_->nbetapi();
-    doccpi_   = reference_wavefunction_->doccpi();
-    soccpi_   = reference_wavefunction_->soccpi();
-    frzcpi_   = reference_wavefunction_->frzcpi();
-    frzvpi_   = reference_wavefunction_->frzvpi();
-    nmopi_    = reference_wavefunction_->nmopi();
-    nirrep_   = reference_wavefunction_->nirrep();
-    nso_      = reference_wavefunction_->nso();
-    nmo_      = reference_wavefunction_->nmo();
-    nsopi_    = reference_wavefunction_->nsopi();
-    molecule_ = reference_wavefunction_->molecule();
-    enuc_     = molecule_->nuclear_repulsion_energy({0.0,0.0,0.0});
+  nalphapi_ = reference_wavefunction_->nalphapi();
+  nbetapi_ = reference_wavefunction_->nbetapi();
+  doccpi_ = reference_wavefunction_->doccpi();
+  soccpi_ = reference_wavefunction_->soccpi();
+  frzcpi_ = reference_wavefunction_->frzcpi();
+  frzvpi_ = reference_wavefunction_->frzvpi();
+  nmopi_ = reference_wavefunction_->nmopi();
+  nirrep_ = reference_wavefunction_->nirrep();
+  nso_ = reference_wavefunction_->nso();
+  nmo_ = reference_wavefunction_->nmo();
+  nsopi_ = reference_wavefunction_->nsopi();
+  molecule_ = reference_wavefunction_->molecule();
+  enuc_ = molecule_->nuclear_repulsion_energy({0.0, 0.0, 0.0});
 
-    // need somewhere to store gradient, if required
-    gradient_ =  reference_wavefunction_->matrix_factory()->create_shared_matrix("Total gradient", molecule_->natom(), 3);
+  // need somewhere to store gradient, if required
+  gradient_ = reference_wavefunction_->matrix_factory()->create_shared_matrix(
+      "Total gradient", molecule_->natom(), 3);
 
-    // restricted doubly occupied orbitals per irrep (optimized)
-    rstcpi_   = (int*)malloc(nirrep_*sizeof(int));
-    memset((void*)rstcpi_,'\0',nirrep_*sizeof(int));
+  // restricted doubly occupied orbitals per irrep (optimized)
+  rstcpi_ = (int *)malloc(nirrep_ * sizeof(int));
+  memset((void *)rstcpi_, '\0', nirrep_ * sizeof(int));
 
-    // restricted unoccupied occupied orbitals per irrep (optimized)
-    rstvpi_   = (int*)malloc(nirrep_*sizeof(int));
-    memset((void*)rstvpi_,'\0',nirrep_*sizeof(int));
+  // restricted unoccupied occupied orbitals per irrep (optimized)
+  rstvpi_ = (int *)malloc(nirrep_ * sizeof(int));
+  memset((void *)rstvpi_, '\0', nirrep_ * sizeof(int));
 
-    // active orbitals per irrep:
-    amopi_    = (int*)malloc(nirrep_*sizeof(int));
-    memset((void*)amopi_,'\0',nirrep_*sizeof(int));
+  // active orbitals per irrep:
+  amopi_ = (int *)malloc(nirrep_ * sizeof(int));
+  memset((void *)amopi_, '\0', nirrep_ * sizeof(int));
 
-    // multiplicity:
-    multiplicity_ = Process::environment.molecule()->multiplicity();
+  // multiplicity:
+  multiplicity_ = Process::environment.molecule()->multiplicity();
 
-    if (options_["FROZEN_DOCC"].has_changed()) {
-        //gg need to take this out to allow frozen doubly occupied orbitals
-        //gg-fc 
-        //throw PsiException("FROZEN_DOCC is currently disabled.",__FILE__,__LINE__);
+  if (options_["FROZEN_DOCC"].has_changed()) {
+    // gg need to take this out to allow frozen doubly occupied orbitals
+    // gg-fc
+    // throw PsiException("FROZEN_DOCC is currently
+    // disabled.",__FILE__,__LINE__);
 
-        if (options_["FROZEN_DOCC"].size() != nirrep_) {
-            throw PsiException("The FROZEN_DOCC array has the wrong dimensions_",__FILE__,__LINE__);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            frzcpi_[h] = options_["FROZEN_DOCC"][h].to_double();
-        }
+    if (options_["FROZEN_DOCC"].size() != nirrep_) {
+      throw PsiException("The FROZEN_DOCC array has the wrong dimensions_",
+                         __FILE__, __LINE__);
     }
-    if (options_["RESTRICTED_DOCC"].has_changed()) {
-        if (options_["RESTRICTED_DOCC"].size() != nirrep_) {
-            throw PsiException("The RESTRICTED_DOCC array has the wrong dimensions_",__FILE__,__LINE__);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            rstcpi_[h] = options_["RESTRICTED_DOCC"][h].to_double();
-        }
+    for (int h = 0; h < nirrep_; h++) {
+      frzcpi_[h] = options_["FROZEN_DOCC"][h].to_double();
     }
+  }
+  if (options_["RESTRICTED_DOCC"].has_changed()) {
+    if (options_["RESTRICTED_DOCC"].size() != nirrep_) {
+      throw PsiException("The RESTRICTED_DOCC array has the wrong dimensions_",
+                         __FILE__, __LINE__);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      rstcpi_[h] = options_["RESTRICTED_DOCC"][h].to_double();
+    }
+  }
+  if (options_["RESTRICTED_UOCC"].has_changed()) {
+    if (options_["RESTRICTED_UOCC"].size() != nirrep_) {
+      throw PsiException("The RESTRICTED_UOCC array has the wrong dimensions_",
+                         __FILE__, __LINE__);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      rstvpi_[h] = options_["RESTRICTED_UOCC"][h].to_double();
+    }
+  }
+  if (options_["FROZEN_UOCC"].has_changed()) {
+
+    // if ( !is_df_ ) {
+    //     throw PsiException("FROZEN_UOCC is currently enabled only for
+    //     SCF_TYPE CD and DF.",__FILE__,__LINE__);
+    // }
+    if (options_["FROZEN_UOCC"].size() != nirrep_) {
+      throw PsiException("The FROZEN_UOCC array has the wrong dimensions_",
+                         __FILE__, __LINE__);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      frzvpi_[h] = options_["FROZEN_UOCC"][h].to_double();
+    }
+  }
+
+  // user could specify active space with ACTIVE array
+  if (options_["ACTIVE"].has_changed()) {
+    // throw PsiException("The ACTIVE array is not yet
+    // enabled.",__FILE__,__LINE__);
+    if (options_["ACTIVE"].size() != nirrep_) {
+      throw PsiException("The ACTIVE array has the wrong dimensions_", __FILE__,
+                         __LINE__);
+    }
+
+    // warn user that active array takes precedence over restricted_uocc array
     if (options_["RESTRICTED_UOCC"].has_changed()) {
-        if (options_["RESTRICTED_UOCC"].size() != nirrep_) {
-            throw PsiException("The RESTRICTED_UOCC array has the wrong dimensions_",__FILE__,__LINE__);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            rstvpi_[h] = options_["RESTRICTED_UOCC"][h].to_double();
-        }
-    }
-    if (options_["FROZEN_UOCC"].has_changed()) {
-
-        //if ( !is_df_ ) {
-        //    throw PsiException("FROZEN_UOCC is currently enabled only for SCF_TYPE CD and DF.",__FILE__,__LINE__);
-        //}
-        if (options_["FROZEN_UOCC"].size() != nirrep_) {
-            throw PsiException("The FROZEN_UOCC array has the wrong dimensions_",__FILE__,__LINE__);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            frzvpi_[h] = options_["FROZEN_UOCC"][h].to_double();
-        }
+      outfile->Printf("\n");
+      outfile->Printf("    <<< WARNING!! >>>\n");
+      outfile->Printf("\n");
+      outfile->Printf("    The ACTIVE array takes precedence over the "
+                      "RESTRICTED_UOCC array.\n");
+      outfile->Printf("    Check below whether your active space was correctly "
+                      "specified.\n");
+      outfile->Printf("\n");
     }
 
-    // user could specify active space with ACTIVE array
-    if ( options_["ACTIVE"].has_changed() ) {
-        //throw PsiException("The ACTIVE array is not yet enabled.",__FILE__,__LINE__);
-        if (options_["ACTIVE"].size() != nirrep_) {
-            throw PsiException("The ACTIVE array has the wrong dimensions_",__FILE__,__LINE__);
-        }
-
-        // warn user that active array takes precedence over restricted_uocc array
-        if (options_["RESTRICTED_UOCC"].has_changed()) {
-            outfile->Printf("\n");
-            outfile->Printf("    <<< WARNING!! >>>\n");
-            outfile->Printf("\n");
-            outfile->Printf("    The ACTIVE array takes precedence over the RESTRICTED_UOCC array.\n");
-            outfile->Printf("    Check below whether your active space was correctly specified.\n");
-            outfile->Printf("\n");
-        }
-
-        // overwrite rstvpi_ array using the information in the frozen_docc,
-        // restricted_docc, active, and frozen_virtual arrays.  start with nso total
-        // orbitals and let the linear dependency check below adjust the spaces as needed
-        for (int h = 0; h < nirrep_; h++) {
-            amopi_[h]  = options_["ACTIVE"][h].to_double();
-            rstvpi_[h] = nsopi_[h] - frzcpi_[h] - rstcpi_[h] - frzvpi_[h] - amopi_[h];
-        }
-    }
-
-    // were there linear dependencies in the primary basis set?
-    if ( nmo_ != nso_ ) {
-
-        // which irreps lost orbitals?
-        int * lost = (int*)malloc(nirrep_*sizeof(int));
-        memset((void*)lost,'\0',nirrep_*sizeof(int));
-        bool active_space_changed = false;
-        for (int h = 0; h < factory_->nirrep(); h++){
-            lost[h] = nsopi_[h] - nmopi_[h];
-            if ( lost[h] > 0 ) {
-                active_space_changed = true;
-            }
-
-            // eliminate frozen virtual orbitals first
-            if ( frzvpi_[h] > 0 && lost[h] > 0 ) {
-                frzvpi_[h] -= ( frzvpi_[h] < lost[h] ? frzvpi_[h] : lost[h] );
-                lost[h]    -= ( frzvpi_[h] < lost[h] ? frzvpi_[h] : lost[h] );
-            }
-            // if necessary, eliminate restricted virtual orbitals next
-            if ( rstvpi_[h] > 0 && lost[h] > 0 ) {
-                rstvpi_[h] -= ( rstvpi_[h] < lost[h] ? rstvpi_[h] : lost[h] );
-            }
-        }
-        if ( active_space_changed ) {
-            outfile->Printf("\n");
-            outfile->Printf("    <<< WARNING!! >>>\n");
-            outfile->Printf("\n");
-            outfile->Printf("    Your basis set may have linear dependencies.\n");
-            outfile->Printf("    The number of restricted or frozen virtual orbitals per irrep may have changed.\n");
-            outfile->Printf("\n");
-            outfile->Printf("    No. orbitals removed per irrep: [");
-            for (int h = 0; h < nirrep_; h++)
-                outfile->Printf("%4i",nsopi_[h] - nmopi_[h]);
-            outfile->Printf(" ]\n");
-            //outfile->Printf("    No. frozen virtuals per irrep:  [");
-            //for (int h = 0; h < nirrep_; h++)
-            //    outfile->Printf("%4i",frzvpi_[h]);
-            //outfile->Printf(" ]\n");
-            //outfile->Printf("\n");
-            outfile->Printf("    Check that your active space is still correct.\n");
-            outfile->Printf("\n");
-        }
-    }
-
-    AO2SO_ = SharedMatrix(reference_wavefunction_->aotoso());
-
-    Ca_ = SharedMatrix(reference_wavefunction_->Ca());
-    Cb_ = SharedMatrix(reference_wavefunction_->Cb());
-
-    if ( options_.get_bool("LOCALIZE_ORBITALS") ) {
-        // localize orbitals:
-        std::shared_ptr<BoysLocalizer> boys (new BoysLocalizer(reference_wavefunction_->basisset(),reference_wavefunction_->Ca_subset("SO","OCC")));
-        boys->localize();
-        for (int mu = 0; mu < nso_; mu++) {
-            for (int i = 0; i < nalpha_; i++) {
-                Ca_->pointer()[mu][i] = boys->L()->pointer()[mu][i];
-                Cb_->pointer()[mu][i] = boys->L()->pointer()[mu][i];
-            }
-        }
-        // localize orbitals (virtual):
-        std::shared_ptr<BoysLocalizer> boys_vir (new BoysLocalizer(reference_wavefunction_->basisset(),reference_wavefunction_->Ca_subset("SO","VIR")));
-        boys_vir->localize();
-        for (int mu = 0; mu < nso_; mu++) {
-            for (int i = (int)nalpha_; i < nso_; i++) {
-                Ca_->pointer()[mu][i] = boys_vir->L()->pointer()[mu][i - (int)nalpha_];
-                Cb_->pointer()[mu][i] = boys_vir->L()->pointer()[mu][i - (int)nalpha_];
-            }
-        }
-    }
-
-    double fractional_charge = options_.get_double("FRACTIONAL_CHARGE");
-    if ( fractional_charge > 0.0 ) { 
-        nalpha_ -= options_.get_double("FRACTIONAL_CHARGE");
-    }else {
-        nbeta_ -= options_.get_double("FRACTIONAL_CHARGE");
-    }
-
-
-    S_  = (SharedMatrix)(new Matrix(reference_wavefunction_->S()));
-
-    Fa_  = (SharedMatrix)(new Matrix(reference_wavefunction_->Fa()));
-    Fb_  = (SharedMatrix)(new Matrix(reference_wavefunction_->Fb()));
-
-    Da_  = (SharedMatrix)(new Matrix(reference_wavefunction_->Da()));
-    Db_  = (SharedMatrix)(new Matrix(reference_wavefunction_->Db()));
-
-    // Lagrangian matrix
-    Lagrangian_ = SharedMatrix(reference_wavefunction_->lagrangian());
-
-    epsilon_a_ = std::make_shared<Vector>(nmopi_);
-    epsilon_a_->copy(*reference_wavefunction_->epsilon_a());
-    epsilon_b_ = std::make_shared<Vector>(nmopi_);
-    epsilon_b_->copy(*reference_wavefunction_->epsilon_b());
-
-    amo_      = 0;
-    nfrzc_    = 0;
-    nfrzv_    = 0;
-    nrstc_    = 0;
-    nrstv_    = 0;
-
-    int ndocc = 0;
-    int nvirt = 0;
-    for (int h = 0; h < nirrep_; h++){
-        nfrzc_   += frzcpi_[h];
-        nrstc_   += rstcpi_[h];
-        nrstv_   += rstvpi_[h];
-        nfrzv_   += frzvpi_[h];
-        amo_   += nmopi_[h]-frzcpi_[h]-rstcpi_[h]-rstvpi_[h]-frzvpi_[h];
-        ndocc    += doccpi_[h];
-        amopi_[h] = nmopi_[h]-frzcpi_[h]-rstcpi_[h]-rstvpi_[h]-frzvpi_[h];
-    }
-
-    int ndoccact = ndocc - nfrzc_ - nrstc_;
-    nvirt    = amo_ - ndoccact;
-
-    // sanity check for orbital occupancies:
+    // overwrite rstvpi_ array using the information in the frozen_docc,
+    // restricted_docc, active, and frozen_virtual arrays.  start with nso total
+    // orbitals and let the linear dependency check below adjust the spaces as
+    // needed
     for (int h = 0; h < nirrep_; h++) {
-        int tot = doccpi_[h] + soccpi_[h] + rstvpi_[h] + frzvpi_[h];
-        if (doccpi_[h] + soccpi_[h] + rstvpi_[h] + frzvpi_[h] > nmopi_[h] ) {
-            outfile->Printf("\n");
-            outfile->Printf("    <<< WARNING >>> irrep %5i has too many orbitals:\n",h);
-            outfile->Printf("\n");
-            outfile->Printf("                    docc = %5i\n",doccpi_[h]);
-            outfile->Printf("                    socc = %5i\n",soccpi_[h]);
-            outfile->Printf("                    rstu = %5i\n",rstvpi_[h]);
-            outfile->Printf("                    frzv = %5i\n",frzvpi_[h]);
-            outfile->Printf("                    tot  = %5i\n",doccpi_[h] + soccpi_[h] + rstvpi_[h] + frzvpi_[h]);
-            outfile->Printf("\n");
-            outfile->Printf("                    total no. orbitals should be %5i\n",nmopi_[h]);
-            outfile->Printf("\n");
-            throw PsiException("at least one irrep has too many orbitals",__FILE__,__LINE__);
-        }
-        if (frzcpi_[h] + rstcpi_[h] > doccpi_[h] ) {
-            outfile->Printf("\n");
-            outfile->Printf("    <<< WARNING >>> irrep %5i has too many frozen and restricted core orbitals:\n",h);
-            outfile->Printf("                    frzc = %5i\n",frzcpi_[h]);
-            outfile->Printf("                    rstd = %5i\n",rstcpi_[h]);
-            outfile->Printf("                    docc = %5i\n",doccpi_[h]);
-            outfile->Printf("\n");
-            throw PsiException("at least one irrep has too many frozen core orbitals",__FILE__,__LINE__);
-        }
+      amopi_[h] = options_["ACTIVE"][h].to_double();
+      rstvpi_[h] = nsopi_[h] - frzcpi_[h] - rstcpi_[h] - frzvpi_[h] - amopi_[h];
+    }
+  }
+
+  // were there linear dependencies in the primary basis set?
+  if (nmo_ != nso_) {
+
+    // which irreps lost orbitals?
+    int *lost = (int *)malloc(nirrep_ * sizeof(int));
+    memset((void *)lost, '\0', nirrep_ * sizeof(int));
+    bool active_space_changed = false;
+    for (int h = 0; h < factory_->nirrep(); h++) {
+      lost[h] = nsopi_[h] - nmopi_[h];
+      if (lost[h] > 0) {
+        active_space_changed = true;
+      }
+
+      // eliminate frozen virtual orbitals first
+      if (frzvpi_[h] > 0 && lost[h] > 0) {
+        frzvpi_[h] -= (frzvpi_[h] < lost[h] ? frzvpi_[h] : lost[h]);
+        lost[h] -= (frzvpi_[h] < lost[h] ? frzvpi_[h] : lost[h]);
+      }
+      // if necessary, eliminate restricted virtual orbitals next
+      if (rstvpi_[h] > 0 && lost[h] > 0) {
+        rstvpi_[h] -= (rstvpi_[h] < lost[h] ? rstvpi_[h] : lost[h]);
+      }
+    }
+    if (active_space_changed) {
+      outfile->Printf("\n");
+      outfile->Printf("    <<< WARNING!! >>>\n");
+      outfile->Printf("\n");
+      outfile->Printf("    Your basis set may have linear dependencies.\n");
+      outfile->Printf("    The number of restricted or frozen virtual orbitals "
+                      "per irrep may have changed.\n");
+      outfile->Printf("\n");
+      outfile->Printf("    No. orbitals removed per irrep: [");
+      for (int h = 0; h < nirrep_; h++)
+        outfile->Printf("%4i", nsopi_[h] - nmopi_[h]);
+      outfile->Printf(" ]\n");
+      // outfile->Printf("    No. frozen virtuals per irrep:  [");
+      // for (int h = 0; h < nirrep_; h++)
+      //     outfile->Printf("%4i",frzvpi_[h]);
+      // outfile->Printf(" ]\n");
+      // outfile->Printf("\n");
+      outfile->Printf("    Check that your active space is still correct.\n");
+      outfile->Printf("\n");
+    }
+  }
+
+  AO2SO_ = SharedMatrix(reference_wavefunction_->aotoso());
+
+  Ca_ = SharedMatrix(reference_wavefunction_->Ca());
+  Cb_ = SharedMatrix(reference_wavefunction_->Cb());
+
+  if (options_.get_bool("LOCALIZE_ORBITALS")) {
+    // localize orbitals:
+    std::shared_ptr<BoysLocalizer> boys(
+        new BoysLocalizer(reference_wavefunction_->basisset(),
+                          reference_wavefunction_->Ca_subset("SO", "OCC")));
+    boys->localize();
+    for (int mu = 0; mu < nso_; mu++) {
+      for (int i = 0; i < nalpha_; i++) {
+        Ca_->pointer()[mu][i] = boys->L()->pointer()[mu][i];
+        Cb_->pointer()[mu][i] = boys->L()->pointer()[mu][i];
+      }
+    }
+    // localize orbitals (virtual):
+    std::shared_ptr<BoysLocalizer> boys_vir(
+        new BoysLocalizer(reference_wavefunction_->basisset(),
+                          reference_wavefunction_->Ca_subset("SO", "VIR")));
+    boys_vir->localize();
+    for (int mu = 0; mu < nso_; mu++) {
+      for (int i = (int)nalpha_; i < nso_; i++) {
+        Ca_->pointer()[mu][i] = boys_vir->L()->pointer()[mu][i - (int)nalpha_];
+        Cb_->pointer()[mu][i] = boys_vir->L()->pointer()[mu][i - (int)nalpha_];
+      }
+    }
+  }
+
+  double fractional_charge = options_.get_double("FRACTIONAL_CHARGE");
+  if (fractional_charge > 0.0) {
+    nalpha_ -= options_.get_double("FRACTIONAL_CHARGE");
+  } else {
+    nbeta_ -= options_.get_double("FRACTIONAL_CHARGE");
+  }
+
+  S_ = (SharedMatrix)(new Matrix(reference_wavefunction_->S()));
+
+  Fa_ = (SharedMatrix)(new Matrix(reference_wavefunction_->Fa()));
+  Fb_ = (SharedMatrix)(new Matrix(reference_wavefunction_->Fb()));
+
+  Da_ = (SharedMatrix)(new Matrix(reference_wavefunction_->Da()));
+  Db_ = (SharedMatrix)(new Matrix(reference_wavefunction_->Db()));
+
+  // Lagrangian matrix
+  Lagrangian_ = SharedMatrix(reference_wavefunction_->lagrangian());
+
+  epsilon_a_ = std::make_shared<Vector>(nmopi_);
+  epsilon_a_->copy(*reference_wavefunction_->epsilon_a());
+  epsilon_b_ = std::make_shared<Vector>(nmopi_);
+  epsilon_b_->copy(*reference_wavefunction_->epsilon_b());
+
+  amo_ = 0;
+  nfrzc_ = 0;
+  nfrzv_ = 0;
+  nrstc_ = 0;
+  nrstv_ = 0;
+
+  int ndocc = 0;
+  int nvirt = 0;
+  for (int h = 0; h < nirrep_; h++) {
+    nfrzc_ += frzcpi_[h];
+    nrstc_ += rstcpi_[h];
+    nrstv_ += rstvpi_[h];
+    nfrzv_ += frzvpi_[h];
+    amo_ += nmopi_[h] - frzcpi_[h] - rstcpi_[h] - rstvpi_[h] - frzvpi_[h];
+    ndocc += doccpi_[h];
+    amopi_[h] = nmopi_[h] - frzcpi_[h] - rstcpi_[h] - rstvpi_[h] - frzvpi_[h];
+  }
+
+  int ndoccact = ndocc - nfrzc_ - nrstc_;
+  nvirt = amo_ - ndoccact;
+
+  // sanity check for orbital occupancies:
+  for (int h = 0; h < nirrep_; h++) {
+    int tot = doccpi_[h] + soccpi_[h] + rstvpi_[h] + frzvpi_[h];
+    if (doccpi_[h] + soccpi_[h] + rstvpi_[h] + frzvpi_[h] > nmopi_[h]) {
+      outfile->Printf("\n");
+      outfile->Printf("    <<< WARNING >>> irrep %5i has too many orbitals:\n",
+                      h);
+      outfile->Printf("\n");
+      outfile->Printf("                    docc = %5i\n", doccpi_[h]);
+      outfile->Printf("                    socc = %5i\n", soccpi_[h]);
+      outfile->Printf("                    rstu = %5i\n", rstvpi_[h]);
+      outfile->Printf("                    frzv = %5i\n", frzvpi_[h]);
+      outfile->Printf("                    tot  = %5i\n",
+                      doccpi_[h] + soccpi_[h] + rstvpi_[h] + frzvpi_[h]);
+      outfile->Printf("\n");
+      outfile->Printf("                    total no. orbitals should be %5i\n",
+                      nmopi_[h]);
+      outfile->Printf("\n");
+      throw PsiException("at least one irrep has too many orbitals", __FILE__,
+                         __LINE__);
+    }
+    if (frzcpi_[h] + rstcpi_[h] > doccpi_[h]) {
+      outfile->Printf("\n");
+      outfile->Printf("    <<< WARNING >>> irrep %5i has too many frozen and "
+                      "restricted core orbitals:\n",
+                      h);
+      outfile->Printf("                    frzc = %5i\n", frzcpi_[h]);
+      outfile->Printf("                    rstd = %5i\n", rstcpi_[h]);
+      outfile->Printf("                    docc = %5i\n", doccpi_[h]);
+      outfile->Printf("\n");
+      throw PsiException("at least one irrep has too many frozen core orbitals",
+                         __FILE__, __LINE__);
+    }
+  }
+
+  // memory is from process::environment
+  memory_ = Process::environment.get_memory();
+  // set the wavefunction name
+  name_ = "V2RDM CASSCF";
+
+  // mo-mo transformation matrix
+  newMO_ = (SharedMatrix)(new Matrix(reference_wavefunction_->Ca()));
+  newMO_->zero();
+  for (int h = 0; h < nirrep_; h++) {
+    for (int i = 0; i < nmopi_[h]; i++) {
+      newMO_->pointer(h)[i][i] = 1.0;
+    }
+  }
+
+  // initialize some quantities common to molecular / hubbard / external
+  // hamiltonians
+  initialize_common_elements();
+
+  std::vector<std::string> labels =
+      reference_wavefunction_->molecule()->irrep_labels();
+  outfile->Printf("        Irrep:           ");
+  for (int h = 0; h < nirrep_; h++) {
+    outfile->Printf("%4s", labels[h].c_str());
+    if (h < nirrep_ - 1) {
+      outfile->Printf(",");
+    }
+  }
+  outfile->Printf(" \n");
+  outfile->Printf(" \n");
+
+  outfile->Printf("        frozen_docc     [");
+  for (int h = 0; h < nirrep_; h++) {
+    outfile->Printf("%4i", frzcpi_[h]);
+    if (h < nirrep_ - 1) {
+      outfile->Printf(",");
+    }
+  }
+  outfile->Printf(" ]\n");
+  outfile->Printf("        restricted_docc [");
+  for (int h = 0; h < nirrep_; h++) {
+    outfile->Printf("%4i", rstcpi_[h]);
+    if (h < nirrep_ - 1) {
+      outfile->Printf(",");
+    }
+  }
+  outfile->Printf(" ]\n");
+  outfile->Printf("        active          [");
+  for (int h = 0; h < nirrep_; h++) {
+    outfile->Printf("%4i", amopi_[h]);
+    if (h < nirrep_ - 1) {
+      outfile->Printf(",");
+    }
+  }
+  outfile->Printf(" ]\n");
+  outfile->Printf("        restricted_uocc [");
+  for (int h = 0; h < nirrep_; h++) {
+    outfile->Printf("%4i", rstvpi_[h]);
+    if (h < nirrep_ - 1) {
+      outfile->Printf(",");
+    }
+  }
+  outfile->Printf(" ]\n");
+  outfile->Printf("        frozen_uocc     [");
+  for (int h = 0; h < nirrep_; h++) {
+    outfile->Printf("%4i", frzvpi_[h]);
+    if (h < nirrep_ - 1) {
+      outfile->Printf(",");
+    }
+  }
+  outfile->Printf(" ]\n");
+  outfile->Printf("\n");
+
+  bool do_act_act = options_.get_bool("ORBOPT_ACTIVE_ACTIVE_ROTATIONS");
+
+  outfile->Printf("  ==> Orbital optimization parameters <==\n");
+  outfile->Printf("\n");
+  outfile->Printf("        1-step algorithm:                   %5s\n",
+                  options_.get_bool("ORBOPT_ONE_STEP") ? "true" : "false");
+  outfile->Printf("        g_convergence:                      %5.3le\n",
+                  options_.get_double("ORBOPT_GRADIENT_CONVERGENCE"));
+  outfile->Printf("        e_convergence:                      %5.3le\n",
+                  options_.get_double("ORBOPT_ENERGY_CONVERGENCE"));
+  outfile->Printf("        maximum iterations:                 %5i\n",
+                  options_.get_int("ORBOPT_MAXITER"));
+  outfile->Printf("        adaptive maxiter:                   %5s\n",
+                  options_.get_bool("ORBOPT_ADAPTIVE_MAXITER") ? "true"
+                                                               : "false");
+  if (options_.get_bool("ORBOPT_ADAPTIVE_MAXITER")) {
+    outfile->Printf("        adaptive start maxiter:             %5i\n",
+                    options_.get_int("ORBOPT_ADAPTIVE_START_MAXITER"));
+    outfile->Printf("        adaptive final maxiter:             %5i\n",
+                    options_.get_int("ORBOPT_ADAPTIVE_FINAL_MAXITER"));
+    outfile->Printf("        adaptive switch gradient:           %5.3le\n",
+                    options_.get_double("ORBOPT_ADAPTIVE_SWITCH_GRADIENT"));
+  }
+  outfile->Printf("        frequency:                          %5i\n",
+                  options_.get_int("ORBOPT_FREQUENCY"));
+  outfile->Printf("        active-active rotations:            %5s\n",
+                  do_act_act ? "true" : "false");
+  outfile->Printf("        exact diagonal Hessian:             %5s\n",
+                  options_.get_bool("ORBOPT_EXACT_DIAGONAL_HESSIAN") ? "true"
+                                                                     : "false");
+  outfile->Printf("        number of DIIS vectors:             %5i\n",
+                  options_.get_int("ORBOPT_NUM_DIIS_VECTORS"));
+  outfile->Printf("        FOCAS step memory:                  %5s\n",
+                  options_.get_bool("ORBOPT_FOCAS_STEP_MEMORY") ? "true"
+                                                                : "false");
+  outfile->Printf("        FOCAS step increase factor:         %5.3f\n",
+                  options_.get_double("ORBOPT_FOCAS_STEP_INCREASE_FACTOR"));
+  outfile->Printf("        FOCAS C1 blocked DF transform:      %5s\n",
+                  options_.get_bool("ORBOPT_FOCAS_DF_C1_BLOCKED") ? "true"
+                                                                  : "false");
+  outfile->Printf("        FOCAS C1 DF block_q:                %5i\n",
+                  options_.get_int("ORBOPT_FOCAS_DF_C1_BLOCK_Q"));
+  outfile->Printf("        FOCAS C1 DF block memory fraction:  %5.3f\n",
+                  options_.get_double(
+                      "ORBOPT_FOCAS_DF_C1_BLOCK_MEMORY_FRACTION"));
+  outfile->Printf("        FOCAS C1 DF use available memory:   %5s\n",
+                  options_.get_bool(
+                      "ORBOPT_FOCAS_DF_C1_BLOCK_USE_AVAILABLE_MEMORY")
+                      ? "true"
+                      : "false");
+  outfile->Printf("        FOCAS C1 DF max automatic block_q:  %5i\n",
+                  options_.get_int("ORBOPT_FOCAS_DF_C1_BLOCK_Q_MAX"));
+  outfile->Printf("        FOCAS DF CUDA transform:            %5s\n",
+                  focas_df_cuda_bool(options_, "ORBOPT_FOCAS_DF_CUDA",
+                                     "ORBOPT_FOCAS_DF_C1_CUDA") ? "true"
+                                                               : "false");
+  outfile->Printf("        FOCAS DF CUDA validation:           %5s\n",
+                  focas_df_cuda_bool(options_, "ORBOPT_FOCAS_DF_CUDA_VALIDATE",
+                                     "ORBOPT_FOCAS_DF_C1_CUDA_VALIDATE")
+                      ? "true"
+                      : "false");
+  if (focas_df_cuda_int(options_, "ORBOPT_FOCAS_DF_CUDA_NUM_GPUS",
+                        "ORBOPT_FOCAS_DF_C1_CUDA_NUM_GPUS") <= 0) {
+    outfile->Printf("        FOCAS DF CUDA max GPUs:               all visible\n");
+  } else {
+    outfile->Printf("        FOCAS DF CUDA max GPUs:             %5i\n",
+                    focas_df_cuda_int(options_, "ORBOPT_FOCAS_DF_CUDA_NUM_GPUS",
+                                      "ORBOPT_FOCAS_DF_C1_CUDA_NUM_GPUS"));
+  }
+  outfile->Printf("        FOCAS DF CUDA verbose:              %5s\n",
+                  focas_df_cuda_bool(options_, "ORBOPT_FOCAS_DF_CUDA_VERBOSE",
+                                     "ORBOPT_FOCAS_DF_C1_CUDA_VERBOSE")
+                      ? "true"
+                      : "false");
+  outfile->Printf("        print iteration info:               %5s\n",
+                  options_.get_bool("ORBOPT_WRITE") ? "true" : "false");
+
+  //  if restarting, need to grab Ca_ from disk before integral transformation
+  // checkpoint file
+  if (options_.get_str("RESTART_FROM_CHECKPOINT_FILE") != "") {
+    ReadOrbitalsFromCheckpointFile();
+  }
+
+  // one- and two-electron integrals
+
+  // if using 3-index integrals, transform them before allocating any memory
+  // integrals, transform
+  if (is_df_) {
+    bool qmo_loaded = false;
+
+    if (options_.get_str("RESTART_FROM_CHECKPOINT_FILE") != "" &&
+        options_.get_bool("CHECKPOINT_WRITE_QMO")) {
+      outfile->Printf("    ==> Loading Qmo from companion file <==\n");
+      outfile->Printf("\n");
+      double t0 = omp_get_wtime();
+      qmo_loaded = ReadQmoFromFile();
+      if (qmo_loaded) {
+        outfile->Printf("        Time for Qmo load:                %7.2lf s\n",
+                        omp_get_wtime() - t0);
+        outfile->Printf("\n");
+      }
     }
 
-    // memory is from process::environment
-    memory_ = Process::environment.get_memory();
-    // set the wavefunction name
-    name_ = "V2RDM CASSCF";
+    if (!qmo_loaded) {
+      outfile->Printf("    ==> Transform three-index integrals <==\n");
+      outfile->Printf("\n");
 
-    // mo-mo transformation matrix
-    newMO_ = (SharedMatrix)(new Matrix(reference_wavefunction_->Ca()));
-    newMO_->zero();
-    for (int h = 0; h < nirrep_; h++) {
-        for (int i = 0; i < nmopi_[h]; i++) {
-            newMO_->pointer(h)[i][i] = 1.0;
-        }
-    }
+      double start = omp_get_wtime();
+      ThreeIndexIntegrals(reference_wavefunction_, nQ_, memory_);
 
-    // initialize some quantities common to molecular / hubbard / external hamiltonians
-    initialize_common_elements();
+      Qmo_ = (double *)malloc(nmo_ * (nmo_ + 1) / 2 * nQ_ * sizeof(double));
+      memset((void *)Qmo_, '\0', nmo_ * (nmo_ + 1) / 2 * nQ_ * sizeof(double));
 
-    std::vector<std::string> labels = reference_wavefunction_->molecule()->irrep_labels();
-    outfile->Printf("        Irrep:           ");
-    for (int h = 0; h < nirrep_; h++) {
-        outfile->Printf("%4s",labels[h].c_str());
-        if ( h < nirrep_ - 1 ) {
-            outfile->Printf(",");
-        }
-    }
-    outfile->Printf(" \n");
-    outfile->Printf(" \n");
+      std::shared_ptr<PSIO> psio(new PSIO());
+      psio->open(PSIF_DCC_QMO, PSIO_OPEN_OLD);
+      psio->read_entry(PSIF_DCC_QMO, "(Q|mn) Integrals", (char *)Qmo_,
+                       sizeof(double) * nQ_ * nmo_ * (nmo_ + 1) / 2);
+      psio->close(PSIF_DCC_QMO, 1);
 
-    outfile->Printf("        frozen_docc     [");
-    for (int h = 0; h < nirrep_; h++) {
-        outfile->Printf("%4i",frzcpi_[h]);
-        if ( h < nirrep_ - 1 ) {
-            outfile->Printf(",");
-        }
+      double end = omp_get_wtime();
+
+      outfile->Printf("\n");
+      outfile->Printf("        Time for integral transformation:  %7.2lf s\n",
+                      end - start);
+      outfile->Printf("\n");
     }
-    outfile->Printf(" ]\n");
-    outfile->Printf("        restricted_docc [");
-    for (int h = 0; h < nirrep_; h++) {
-        outfile->Printf("%4i",rstcpi_[h]);
-        if ( h < nirrep_ - 1 ) {
-            outfile->Printf(",");
-        }
-    }
-    outfile->Printf(" ]\n");
-    outfile->Printf("        active          [");
-    for (int h = 0; h < nirrep_; h++) {
-        outfile->Printf("%4i",amopi_[h]);
-        if ( h < nirrep_ - 1 ) {
-            outfile->Printf(",");
-        }
-    }
-    outfile->Printf(" ]\n");
-    outfile->Printf("        restricted_uocc [");
-    for (int h = 0; h < nirrep_; h++) {
-        outfile->Printf("%4i",rstvpi_[h]);
-        if ( h < nirrep_ - 1 ) {
-            outfile->Printf(",");
-        }
-    }
-    outfile->Printf(" ]\n");
-    outfile->Printf("        frozen_uocc     [");
-    for (int h = 0; h < nirrep_; h++) {
-        outfile->Printf("%4i",frzvpi_[h]);
-        if ( h < nirrep_ - 1 ) {
-            outfile->Printf(",");
-        }
-    }
-    outfile->Printf(" ]\n");
+  } else {
+    // transform integrals
+    outfile->Printf("    ==> Transform two-electron integrals <==\n");
     outfile->Printf("\n");
 
-    bool do_act_act = options_.get_bool("ORBOPT_ACTIVE_ACTIVE_ROTATIONS");
-
-    outfile->Printf("  ==> Orbital optimization parameters <==\n");
+    double start = omp_get_wtime();
+    std::vector<std::shared_ptr<MOSpace>> spaces;
+    spaces.push_back(MOSpace::all);
+    std::shared_ptr<IntegralTransform> ints(
+        new IntegralTransform(reference_wavefunction_, spaces,
+                              IntegralTransform::TransformationType::Restricted,
+                              IntegralTransform::OutputType::IWLOnly,
+                              IntegralTransform::MOOrdering::PitzerOrder,
+                              IntegralTransform::FrozenOrbitals::None, false));
+    ints->set_dpd_id(0);
+    ints->set_keep_iwl_so_ints(true);
+    ints->set_keep_dpd_so_ints(true);
+    ints->initialize();
+    ints->transform_tei(MOSpace::all, MOSpace::all, MOSpace::all, MOSpace::all);
+    double end = omp_get_wtime();
     outfile->Printf("\n");
-    outfile->Printf("        1-step algorithm:                   %5s\n",options_.get_bool("ORBOPT_ONE_STEP") ? "true" : "false");
-    outfile->Printf("        g_convergence:                      %5.3le\n",options_.get_double("ORBOPT_GRADIENT_CONVERGENCE"));
-    outfile->Printf("        e_convergence:                      %5.3le\n",options_.get_double("ORBOPT_ENERGY_CONVERGENCE"));
-    outfile->Printf("        maximum iterations:                 %5i\n",options_.get_int("ORBOPT_MAXITER"));
-    outfile->Printf("        frequency:                          %5i\n",options_.get_int("ORBOPT_FREQUENCY"));
-    outfile->Printf("        active-active rotations:            %5s\n",do_act_act ? "true" : "false");
-    outfile->Printf("        exact diagonal Hessian:             %5s\n",options_.get_bool("ORBOPT_EXACT_DIAGONAL_HESSIAN") ? "true" : "false");
-    outfile->Printf("        number of DIIS vectors:             %5i\n",options_.get_int("ORBOPT_NUM_DIIS_VECTORS"));
-    outfile->Printf("        print iteration info:               %5s\n",options_.get_bool("ORBOPT_WRITE") ? "true" : "false");
-
-    //  if restarting, need to grab Ca_ from disk before integral transformation
-    // checkpoint file
-    if ( options_.get_str("RESTART_FROM_CHECKPOINT_FILE") != "" ) {
-        ReadOrbitalsFromCheckpointFile();
-    }
-
-    // one- and two-electron integrals
-
-    // if using 3-index integrals, transform them before allocating any memory integrals, transform
-    if ( is_df_ ) {
-        outfile->Printf("    ==> Transform three-index integrals <==\n");
-        outfile->Printf("\n");
-
-        double start = omp_get_wtime();
-        ThreeIndexIntegrals(reference_wavefunction_,nQ_,memory_);
-
-        Qmo_ = (double*)malloc(nmo_*(nmo_+1)/2*nQ_*sizeof(double));
-        memset((void*)Qmo_,'\0',nmo_*(nmo_+1)/2*nQ_*sizeof(double));
-
-        std::shared_ptr<PSIO> psio(new PSIO());
-        psio->open(PSIF_DCC_QMO,PSIO_OPEN_OLD);
-        psio->read_entry(PSIF_DCC_QMO,"(Q|mn) Integrals",(char*)Qmo_,sizeof(double)*nQ_ * nmo_*(nmo_+1)/2);
-        psio->close(PSIF_DCC_QMO,1);
-
-        double end = omp_get_wtime();
-
-        outfile->Printf("\n");
-        outfile->Printf("        Time for integral transformation:  %7.2lf s\n",end-start);
-        outfile->Printf("\n");
-    } else {
-        // transform integrals
-        outfile->Printf("    ==> Transform two-electron integrals <==\n");
-        outfile->Printf("\n");
-
-        double start = omp_get_wtime();
-        std::vector<std::shared_ptr<MOSpace> > spaces;
-        spaces.push_back(MOSpace::all);
-        std::shared_ptr<IntegralTransform> ints(new IntegralTransform(reference_wavefunction_, spaces, 
-            IntegralTransform::TransformationType::Restricted, IntegralTransform::OutputType::IWLOnly, 
-            IntegralTransform::MOOrdering::PitzerOrder, IntegralTransform::FrozenOrbitals::None, false));
-        ints->set_dpd_id(0);
-        ints->set_keep_iwl_so_ints(true);
-        ints->set_keep_dpd_so_ints(true);
-        ints->initialize();
-        ints->transform_tei(MOSpace::all, MOSpace::all, MOSpace::all, MOSpace::all);
-        double end = omp_get_wtime();
-        outfile->Printf("\n");
-        outfile->Printf("        Time for integral transformation:  %7.2lf s\n",end-start);
-        outfile->Printf("\n");
-
-    }
-
+    outfile->Printf("        Time for integral transformation:  %7.2lf s\n",
+                    end - start);
+    outfile->Printf("\n");
+  }
 }
 
 void v2RDMSolver::initialize_with_hubbard_hamiltonian() {
 
-    if ( ( options_.get_int("N_HUBBARD_SPINS") % 2 ) != 0 ) {
-        throw PsiException("Hubbard model only works for even numbers of electrons currently.",__FILE__,__LINE__);
+  if ((options_.get_int("N_HUBBARD_SPINS") % 2) != 0) {
+    throw PsiException(
+        "Hubbard model only works for even numbers of electrons currently.",
+        __FILE__, __LINE__);
+  }
+
+  is_df_ = false;
+
+  nalpha_ = options_.get_int("N_HUBBARD_SPINS") / 2;
+  nbeta_ = options_.get_int("N_HUBBARD_SPINS") / 2;
+
+  enuc_ = 0.0;
+  escf_ = 0.0;
+  efzc_ = 0.0;
+
+  nso_ = options_.get_int("N_HUBBARD_SITES");
+  nmo_ = options_.get_int("N_HUBBARD_SITES");
+  amo_ = nmo_;
+  nfrzc_ = 0;
+  nfrzv_ = 0;
+  nrstc_ = 0;
+  nrstv_ = 0;
+
+  int ms = (int)nalpha_ - (int)nbeta_;
+  multiplicity_ = 2 * ms + 1;
+
+  nirrep_ = 1;
+
+  nalphapi_ = Dimension(nirrep_, "Number of alpha electrons per irrep");
+  nbetapi_ = Dimension(nirrep_, "Number of beta electrons per irrep");
+  doccpi_ = Dimension(nirrep_, "Number of doubly occupied orbitals per irrep");
+  soccpi_ = Dimension(nirrep_, "Number of singly occupied orbitals per irrep");
+  frzcpi_ = Dimension(nirrep_, "Number of frozen core orbitals per irrep");
+  frzvpi_ = Dimension(nirrep_, "Number of frozen virtual orbitals per irrep");
+  nmopi_ = Dimension(nirrep_, "Number of molecular orbitals per irrep");
+  nsopi_ = Dimension(nirrep_, "Number of symmetry orbitals per irrep");
+  rstcpi_ = (int *)malloc(nirrep_ * sizeof(int));
+  rstvpi_ = (int *)malloc(nirrep_ * sizeof(int));
+  amopi_ = (int *)malloc(nirrep_ * sizeof(int));
+
+  nalphapi_[0] = (int)nalpha_;
+  nbetapi_[0] = (int)nbeta_;
+  doccpi_[0] = (int)nalpha_;
+  soccpi_[0] = 0;
+  frzcpi_[0] = 0;
+  frzvpi_[0] = 0;
+  nmopi_[0] = nmo_;
+  nsopi_[0] = nso_;
+  rstcpi_[0] = 0;
+  rstvpi_[0] = 0;
+  amopi_[0] = nmo_;
+
+  // molecule ... not sure what to do with this
+  molecule_ = reference_wavefunction_->molecule();
+
+  // need somewhere to store gradient, if required
+  gradient_ = reference_wavefunction_->matrix_factory()->create_shared_matrix(
+      "Total gradient", molecule_->natom(), 3);
+
+  if (options_["FROZEN_DOCC"].has_changed()) {
+    throw PsiException("FROZEN_DOCC is incompatible with Hubbard Hamiltonian.",
+                       __FILE__, __LINE__);
+  }
+  if (options_["RESTRICTED_DOCC"].has_changed()) {
+    throw PsiException(
+        "RESTRICTED_DOCC is incompatible with Hubbard Hamiltonian.", __FILE__,
+        __LINE__);
+  }
+  if (options_["RESTRICTED_UOCC"].has_changed()) {
+    throw PsiException(
+        "RESTRICTED_UOCC is incompatible with Hubbard Hamiltonian.", __FILE__,
+        __LINE__);
+  }
+  if (options_["FROZEN_UOCC"].has_changed()) {
+    throw PsiException("FROZEN_UOCC is incompatible with Hubbard Hamiltonian.",
+                       __FILE__, __LINE__);
+  }
+  if (options_["ACTIVE"].has_changed()) {
+    throw PsiException("ACTIVE is incompatible with Hubbard Hamiltonian.",
+                       __FILE__, __LINE__);
+  }
+  if (options_.get_bool("LOCALIZE_ORBITALS")) {
+    throw PsiException(
+        "LOCALIZE_ORBITALS is incompatible with Hubbard Hamiltonian.", __FILE__,
+        __LINE__);
+  }
+  if (options_["FRACTIONAL_CHARGE"].has_changed()) {
+    throw PsiException(
+        "FRACTIONAL_CHARGE is incompatible with Hubbard Hamiltonian.", __FILE__,
+        __LINE__);
+  }
+
+  AO2SO_ = (SharedMatrix)(new Matrix(nmo_, nmo_));
+
+  Ca_ = (SharedMatrix)(new Matrix(nmo_, nmo_));
+  Cb_ = (SharedMatrix)(new Matrix(nmo_, nmo_));
+
+  S_ = (SharedMatrix)(new Matrix(nmo_, nmo_));
+
+  Fa_ = (SharedMatrix)(new Matrix(nmo_, nmo_));
+  Fb_ = (SharedMatrix)(new Matrix(nmo_, nmo_));
+
+  Da_ = (SharedMatrix)(new Matrix(nmo_, nmo_));
+  Db_ = (SharedMatrix)(new Matrix(nmo_, nmo_));
+
+  // Lagrangian matrix
+  Lagrangian_ = (SharedMatrix)(new Matrix(nmo_, nmo_));
+
+  epsilon_a_ = std::make_shared<Vector>(nmopi_);
+  epsilon_b_ = std::make_shared<Vector>(nmopi_);
+
+  // memory is from process::environment
+  memory_ = Process::environment.get_memory();
+
+  // set the wavefunction name
+  name_ = "V2RDM CASSCF";
+
+  // mo-mo transformation matrix
+  newMO_ = (SharedMatrix)(new Matrix(nmo_, nmo_));
+  newMO_->zero();
+  for (int h = 0; h < nirrep_; h++) {
+    for (int i = 0; i < nmopi_[h]; i++) {
+      newMO_->pointer(h)[i][i] = 1.0;
     }
+  }
 
-    is_df_        = false;
+  // initialize some quantities common to molecular / hubbard / external
+  // hamiltonians
+  initialize_common_elements();
 
-    nalpha_       = options_.get_int("N_HUBBARD_SPINS") / 2;
-    nbeta_        = options_.get_int("N_HUBBARD_SPINS") / 2;
-
-    enuc_         = 0.0;
-    escf_         = 0.0;
-    efzc_         = 0.0;
-
-    nso_          = options_.get_int("N_HUBBARD_SITES");
-    nmo_          = options_.get_int("N_HUBBARD_SITES");
-    amo_          = nmo_;
-    nfrzc_        = 0;
-    nfrzv_        = 0;
-    nrstc_        = 0;
-    nrstv_        = 0;
-
-    int ms = (int)nalpha_ - (int)nbeta_;
-    multiplicity_ = 2 * ms + 1;
-
-    nirrep_       = 1;
-
-    nalphapi_ = Dimension(nirrep_,"Number of alpha electrons per irrep");
-    nbetapi_  = Dimension(nirrep_,"Number of beta electrons per irrep");
-    doccpi_   = Dimension(nirrep_,"Number of doubly occupied orbitals per irrep");
-    soccpi_   = Dimension(nirrep_,"Number of singly occupied orbitals per irrep");
-    frzcpi_   = Dimension(nirrep_,"Number of frozen core orbitals per irrep");
-    frzvpi_   = Dimension(nirrep_,"Number of frozen virtual orbitals per irrep");
-    nmopi_    = Dimension(nirrep_,"Number of molecular orbitals per irrep");
-    nsopi_    = Dimension(nirrep_,"Number of symmetry orbitals per irrep");
-    rstcpi_   = (int*)malloc(nirrep_*sizeof(int));
-    rstvpi_   = (int*)malloc(nirrep_*sizeof(int));
-    amopi_    = (int*)malloc(nirrep_*sizeof(int));
-
-    nalphapi_[0] = (int)nalpha_;
-    nbetapi_[0]  = (int)nbeta_;
-    doccpi_[0]   = (int)nalpha_;
-    soccpi_[0]   = 0;
-    frzcpi_[0]   = 0;
-    frzvpi_[0]   = 0;
-    nmopi_[0]    = nmo_;
-    nsopi_[0]    = nso_;
-    rstcpi_[0]   = 0;
-    rstvpi_[0]   = 0;
-    amopi_[0]    = nmo_;
-
-    // molecule ... not sure what to do with this
-    molecule_ = reference_wavefunction_->molecule();
-
-    // need somewhere to store gradient, if required
-    gradient_ =  reference_wavefunction_->matrix_factory()->create_shared_matrix("Total gradient", molecule_->natom(), 3);
-
-    if (options_["FROZEN_DOCC"].has_changed()) {
-        throw PsiException("FROZEN_DOCC is incompatible with Hubbard Hamiltonian.",__FILE__,__LINE__);
-    }
-    if (options_["RESTRICTED_DOCC"].has_changed()) {
-        throw PsiException("RESTRICTED_DOCC is incompatible with Hubbard Hamiltonian.",__FILE__,__LINE__);
-    }
-    if (options_["RESTRICTED_UOCC"].has_changed()) {
-        throw PsiException("RESTRICTED_UOCC is incompatible with Hubbard Hamiltonian.",__FILE__,__LINE__);
-    }
-    if (options_["FROZEN_UOCC"].has_changed()) {
-        throw PsiException("FROZEN_UOCC is incompatible with Hubbard Hamiltonian.",__FILE__,__LINE__);
-    }
-    if ( options_["ACTIVE"].has_changed() ) {
-        throw PsiException("ACTIVE is incompatible with Hubbard Hamiltonian.",__FILE__,__LINE__);
-    }
-    if ( options_.get_bool("LOCALIZE_ORBITALS") ) {
-        throw PsiException("LOCALIZE_ORBITALS is incompatible with Hubbard Hamiltonian.",__FILE__,__LINE__);
-    }
-    if ( options_["FRACTIONAL_CHARGE"].has_changed() ) {
-        throw PsiException("FRACTIONAL_CHARGE is incompatible with Hubbard Hamiltonian.",__FILE__,__LINE__);
-    }
-
-    AO2SO_ = (SharedMatrix)(new Matrix(nmo_,nmo_));
-
-    Ca_ = (SharedMatrix)(new Matrix(nmo_,nmo_));
-    Cb_ = (SharedMatrix)(new Matrix(nmo_,nmo_));
-
-    S_  = (SharedMatrix)(new Matrix(nmo_,nmo_));
-
-    Fa_  = (SharedMatrix)(new Matrix(nmo_,nmo_));
-    Fb_  = (SharedMatrix)(new Matrix(nmo_,nmo_));
-
-    Da_  = (SharedMatrix)(new Matrix(nmo_,nmo_));
-    Db_  = (SharedMatrix)(new Matrix(nmo_,nmo_));
-
-    // Lagrangian matrix
-    Lagrangian_ = (SharedMatrix)(new Matrix(nmo_,nmo_));
-
-    epsilon_a_ = std::make_shared<Vector>(nmopi_);
-    epsilon_b_ = std::make_shared<Vector>(nmopi_);
-
-    // memory is from process::environment
-    memory_ = Process::environment.get_memory();
-
-    // set the wavefunction name
-    name_ = "V2RDM CASSCF";
-
-    // mo-mo transformation matrix
-    newMO_ = (SharedMatrix)(new Matrix(nmo_,nmo_));
-    newMO_->zero();
-    for (int h = 0; h < nirrep_; h++) {
-        for (int i = 0; i < nmopi_[h]; i++) {
-            newMO_->pointer(h)[i][i] = 1.0;
-        }
-    }
-
-    // initialize some quantities common to molecular / hubbard / external hamiltonians
-    initialize_common_elements();
-
-    //  if restarting, need to grab Ca_ from disk before integral transformation
-    // checkpoint file
-    if ( options_.get_str("RESTART_FROM_CHECKPOINT_FILE") != "" ) {
-        throw PsiException("RESTART_FROM_CHECKPOINT_FILE is incompatible with Hubbard Hamiltonian.",__FILE__,__LINE__);
-    }
-
+  //  if restarting, need to grab Ca_ from disk before integral transformation
+  // checkpoint file
+  if (options_.get_str("RESTART_FROM_CHECKPOINT_FILE") != "") {
+    throw PsiException("RESTART_FROM_CHECKPOINT_FILE is incompatible with "
+                       "Hubbard Hamiltonian.",
+                       __FILE__, __LINE__);
+  }
 }
 
 void v2RDMSolver::initialize_with_external_hamiltonian() {
 
-    is_df_        = false;
+  is_df_ = false;
 
-    // these are set in the constructor
-    //nalpha_       = options_.get_int("N_HUBBARD_SPINS") / 2;
-    //nbeta_        = options_.get_int("N_HUBBARD_SPINS") / 2;
+  // these are set in the constructor
+  // nalpha_       = options_.get_int("N_HUBBARD_SPINS") / 2;
+  // nbeta_        = options_.get_int("N_HUBBARD_SPINS") / 2;
 
-    enuc_         = 0.0;
-    escf_         = 0.0;
-    efzc_         = 0.0;
+  enuc_ = 0.0;
+  escf_ = 0.0;
+  efzc_ = 0.0;
 
-    // these are set in the constructor
-    //nso_          = options_.get_int("N_HUBBARD_SITES");
-    //nmo_          = options_.get_int("N_HUBBARD_SITES");
-    amo_          = nmo_;
-    nfrzc_        = 0;
-    nfrzv_        = 0;
-    nrstc_        = 0;
-    nrstv_        = 0;
+  // these are set in the constructor
+  // nso_          = options_.get_int("N_HUBBARD_SITES");
+  // nmo_          = options_.get_int("N_HUBBARD_SITES");
+  amo_ = nmo_;
+  nfrzc_ = 0;
+  nfrzv_ = 0;
+  nrstc_ = 0;
+  nrstv_ = 0;
 
-    int ms = (int)nalpha_ - (int)nbeta_; // ms times 2
-    multiplicity_ = ms + 1;
+  int ms = (int)nalpha_ - (int)nbeta_; // ms times 2
+  multiplicity_ = ms + 1;
 
-    nirrep_       = 1;
+  nirrep_ = 1;
 
-    nalphapi_ = Dimension(nirrep_,"Number of alpha electrons per irrep");
-    nbetapi_  = Dimension(nirrep_,"Number of beta electrons per irrep");
-    doccpi_   = Dimension(nirrep_,"Number of doubly occupied orbitals per irrep");
-    soccpi_   = Dimension(nirrep_,"Number of singly occupied orbitals per irrep");
-    frzcpi_   = Dimension(nirrep_,"Number of frozen core orbitals per irrep");
-    frzvpi_   = Dimension(nirrep_,"Number of frozen virtual orbitals per irrep");
-    nmopi_    = Dimension(nirrep_,"Number of molecular orbitals per irrep");
-    nsopi_    = Dimension(nirrep_,"Number of symmetry orbitals per irrep");
-    rstcpi_   = (int*)malloc(nirrep_*sizeof(int));
-    rstvpi_   = (int*)malloc(nirrep_*sizeof(int));
-    amopi_    = (int*)malloc(nirrep_*sizeof(int));
+  nalphapi_ = Dimension(nirrep_, "Number of alpha electrons per irrep");
+  nbetapi_ = Dimension(nirrep_, "Number of beta electrons per irrep");
+  doccpi_ = Dimension(nirrep_, "Number of doubly occupied orbitals per irrep");
+  soccpi_ = Dimension(nirrep_, "Number of singly occupied orbitals per irrep");
+  frzcpi_ = Dimension(nirrep_, "Number of frozen core orbitals per irrep");
+  frzvpi_ = Dimension(nirrep_, "Number of frozen virtual orbitals per irrep");
+  nmopi_ = Dimension(nirrep_, "Number of molecular orbitals per irrep");
+  nsopi_ = Dimension(nirrep_, "Number of symmetry orbitals per irrep");
+  rstcpi_ = (int *)malloc(nirrep_ * sizeof(int));
+  rstvpi_ = (int *)malloc(nirrep_ * sizeof(int));
+  amopi_ = (int *)malloc(nirrep_ * sizeof(int));
 
-    nalphapi_[0] = (int)nalpha_;
-    nbetapi_[0]  = (int)nbeta_;
-    doccpi_[0]   = (int)nalpha_;
-    soccpi_[0]   = 0;
-    frzcpi_[0]   = 0;
-    frzvpi_[0]   = 0;
-    nmopi_[0]    = nmo_;
-    nsopi_[0]    = nso_;
-    rstcpi_[0]   = 0;
-    rstvpi_[0]   = 0;
-    amopi_[0]    = nmo_;
+  nalphapi_[0] = (int)nalpha_;
+  nbetapi_[0] = (int)nbeta_;
+  doccpi_[0] = (int)nalpha_;
+  soccpi_[0] = 0;
+  frzcpi_[0] = 0;
+  frzvpi_[0] = 0;
+  nmopi_[0] = nmo_;
+  nsopi_[0] = nso_;
+  rstcpi_[0] = 0;
+  rstvpi_[0] = 0;
+  amopi_[0] = nmo_;
 
-    // molecule ... not sure what to do with this ... doesn't seem safe to just not initialize it
-    //molecule_ = reference_wavefunction_->molecule();
+  // molecule ... not sure what to do with this ... doesn't seem safe to just
+  // not initialize it
+  // molecule_ = reference_wavefunction_->molecule();
 
-    // need somewhere to store gradient, if required ... doesn't seem safe to just not initialize it
-    //gradient_ =  reference_wavefunction_->matrix_factory()->create_shared_matrix("Total gradient", molecule_->natom(), 3);
+  // need somewhere to store gradient, if required ... doesn't seem safe to just
+  // not initialize it
+  // gradient_ =
+  // reference_wavefunction_->matrix_factory()->create_shared_matrix("Total
+  // gradient", molecule_->natom(), 3);
 
-    if (options_["FROZEN_DOCC"].has_changed()) {
-        throw PsiException("FROZEN_DOCC is incompatible with external Hamiltonian.",__FILE__,__LINE__);
+  if (options_["FROZEN_DOCC"].has_changed()) {
+    throw PsiException("FROZEN_DOCC is incompatible with external Hamiltonian.",
+                       __FILE__, __LINE__);
+  }
+  if (options_["RESTRICTED_DOCC"].has_changed()) {
+    throw PsiException(
+        "RESTRICTED_DOCC is incompatible with external Hamiltonian.", __FILE__,
+        __LINE__);
+  }
+  if (options_["RESTRICTED_UOCC"].has_changed()) {
+    throw PsiException(
+        "RESTRICTED_UOCC is incompatible with external Hamiltonian.", __FILE__,
+        __LINE__);
+  }
+  if (options_["FROZEN_UOCC"].has_changed()) {
+    throw PsiException("FROZEN_UOCC is incompatible with external Hamiltonian.",
+                       __FILE__, __LINE__);
+  }
+  if (options_["ACTIVE"].has_changed()) {
+    throw PsiException("ACTIVE is incompatible with external Hamiltonian.",
+                       __FILE__, __LINE__);
+  }
+  if (options_.get_bool("LOCALIZE_ORBITALS")) {
+    throw PsiException(
+        "LOCALIZE_ORBITALS is incompatible with external Hamiltonian.",
+        __FILE__, __LINE__);
+  }
+  if (options_["FRACTIONAL_CHARGE"].has_changed()) {
+    throw PsiException(
+        "FRACTIONAL_CHARGE is incompatible with external Hamiltonian.",
+        __FILE__, __LINE__);
+  }
+
+  AO2SO_ = (SharedMatrix)(new Matrix(nmo_, nmo_));
+
+  Ca_ = (SharedMatrix)(new Matrix(nmo_, nmo_));
+  Cb_ = (SharedMatrix)(new Matrix(nmo_, nmo_));
+
+  S_ = (SharedMatrix)(new Matrix(nmo_, nmo_));
+
+  Fa_ = (SharedMatrix)(new Matrix(nmo_, nmo_));
+  Fb_ = (SharedMatrix)(new Matrix(nmo_, nmo_));
+
+  Da_ = (SharedMatrix)(new Matrix(nmo_, nmo_));
+  Db_ = (SharedMatrix)(new Matrix(nmo_, nmo_));
+
+  // Lagrangian matrix
+  Lagrangian_ = (SharedMatrix)(new Matrix(nmo_, nmo_));
+
+  epsilon_a_ = std::make_shared<Vector>(nmopi_);
+  epsilon_b_ = std::make_shared<Vector>(nmopi_);
+
+  // memory is from process::environment
+  memory_ = Process::environment.get_memory();
+
+  // set the wavefunction name
+  name_ = "V2RDM CASSCF";
+
+  // mo-mo transformation matrix
+  newMO_ = (SharedMatrix)(new Matrix(nmo_, nmo_));
+  newMO_->zero();
+  for (int h = 0; h < nirrep_; h++) {
+    for (int i = 0; i < nmopi_[h]; i++) {
+      newMO_->pointer(h)[i][i] = 1.0;
     }
-    if (options_["RESTRICTED_DOCC"].has_changed()) {
-        throw PsiException("RESTRICTED_DOCC is incompatible with external Hamiltonian.",__FILE__,__LINE__);
-    }
-    if (options_["RESTRICTED_UOCC"].has_changed()) {
-        throw PsiException("RESTRICTED_UOCC is incompatible with external Hamiltonian.",__FILE__,__LINE__);
-    }
-    if (options_["FROZEN_UOCC"].has_changed()) {
-        throw PsiException("FROZEN_UOCC is incompatible with external Hamiltonian.",__FILE__,__LINE__);
-    }
-    if ( options_["ACTIVE"].has_changed() ) {
-        throw PsiException("ACTIVE is incompatible with external Hamiltonian.",__FILE__,__LINE__);
-    }
-    if ( options_.get_bool("LOCALIZE_ORBITALS") ) {
-        throw PsiException("LOCALIZE_ORBITALS is incompatible with external Hamiltonian.",__FILE__,__LINE__);
-    }
-    if ( options_["FRACTIONAL_CHARGE"].has_changed() ) {
-        throw PsiException("FRACTIONAL_CHARGE is incompatible with external Hamiltonian.",__FILE__,__LINE__);
-    }
+  }
 
-    AO2SO_ = (SharedMatrix)(new Matrix(nmo_,nmo_));
+  // initialize some quantities common to molecular / hubbard / external
+  // hamiltonians
+  initialize_common_elements();
 
-    Ca_ = (SharedMatrix)(new Matrix(nmo_,nmo_));
-    Cb_ = (SharedMatrix)(new Matrix(nmo_,nmo_));
-
-    S_  = (SharedMatrix)(new Matrix(nmo_,nmo_));
-
-    Fa_  = (SharedMatrix)(new Matrix(nmo_,nmo_));
-    Fb_  = (SharedMatrix)(new Matrix(nmo_,nmo_));
-
-    Da_  = (SharedMatrix)(new Matrix(nmo_,nmo_));
-    Db_  = (SharedMatrix)(new Matrix(nmo_,nmo_));
-
-    // Lagrangian matrix
-    Lagrangian_ = (SharedMatrix)(new Matrix(nmo_,nmo_));
-
-    epsilon_a_ = std::make_shared<Vector>(nmopi_);
-    epsilon_b_ = std::make_shared<Vector>(nmopi_);
-
-    // memory is from process::environment
-    memory_ = Process::environment.get_memory();
-
-    // set the wavefunction name
-    name_ = "V2RDM CASSCF";
-
-    // mo-mo transformation matrix
-    newMO_ = (SharedMatrix)(new Matrix(nmo_,nmo_));
-    newMO_->zero();
-    for (int h = 0; h < nirrep_; h++) {
-        for (int i = 0; i < nmopi_[h]; i++) {
-            newMO_->pointer(h)[i][i] = 1.0;
-        }
-    }
-
-    // initialize some quantities common to molecular / hubbard / external hamiltonians
-    initialize_common_elements();
-
-    //  if restarting, need to grab Ca_ from disk before integral transformation
-    // checkpoint file
-    if ( options_.get_str("RESTART_FROM_CHECKPOINT_FILE") != "" ) {
-        throw PsiException("RESTART_FROM_CHECKPOINT_FILE is incompatible with external Hamiltonian.",__FILE__,__LINE__);
-    }
-
+  //  if restarting, need to grab Ca_ from disk before integral transformation
+  // checkpoint file
+  if (options_.get_str("RESTART_FROM_CHECKPOINT_FILE") != "") {
+    throw PsiException("RESTART_FROM_CHECKPOINT_FILE is incompatible with "
+                       "external Hamiltonian.",
+                       __FILE__, __LINE__);
+  }
 }
 
 void v2RDMSolver::initialize_common_elements() {
 
-    // NOTE! the following functions must be modified when coding new constraints
+  // NOTE! the following functions must be modified when coding new constraints
 
-    // set_constraints():     determine applied constraints from options object
-    // determine_n_primal():  determine primal variable dimension associated with applied constraints
-    // determine_n_dual():    determine dual variable dimension associated with applied constraints
-    // determine_n_primal_offsets(): set block dimenssions and offsets in primal vector for each rdm block
-    // set_gpc_maps(): set maps between rdm elements and d1-like gpc objects. only relevent if constrain_gpc = true
+  // set_constraints():     determine applied constraints from options object
+  // determine_n_primal():  determine primal variable dimension associated with
+  // applied constraints determine_n_dual():    determine dual variable
+  // dimension associated with applied constraints determine_n_primal_offsets():
+  // set block dimenssions and offsets in primal vector for each rdm block
+  // set_gpc_maps(): set maps between rdm elements and d1-like gpc objects. only
+  // relevent if constrain_gpc = true
 
-    // set constraints
-    set_constraints();
+  // set constraints
+  set_constraints();
 
-    // build mapping arrays and determine the number of geminals per block. constraints must be set before calling
-    build_mapping_arrays();
+  // build mapping arrays and determine the number of geminals per block.
+  // constraints must be set before calling
+  build_mapping_arrays();
 
-    // number of primal variables (dimension of x)
-    determine_n_primal();
+  // number of primal variables (dimension of x)
+  determine_n_primal();
 
-    // number of constraints (dimension of y)
-    determine_n_dual();
+  // number of constraints (dimension of y)
+  determine_n_dual();
 
-    // set primal block dimensions and offsets in x for each spin/symmetry block of rdms
-    set_primal_offsets();
+  // set primal block dimensions and offsets in x for each spin/symmetry block
+  // of rdms
+  set_primal_offsets();
 
-    if ( constrain_gpc_ ) {
-        set_gpc_maps();
+  if (constrain_gpc_) {
+    set_gpc_maps();
+  }
+
+  // print orbitals per irrep in each space
+  outfile->Printf("  ==> Active space details <==\n");
+  outfile->Printf("\n");
+  outfile->Printf("        Number of frozen core orbitals:         %5i\n",
+                  nfrzc_);
+  outfile->Printf("        Number of restricted occupied orbitals: %5i\n",
+                  nrstc_);
+  outfile->Printf("        Number of active occupied orbitals:     %5i\n",
+                  (int)nalpha_);
+  outfile->Printf("        Number of active virtual orbitals:      %5i\n",
+                  nmo_ - (int)nalpha_);
+  outfile->Printf("        Number of restricted virtual orbitals:  %5i\n",
+                  nrstv_);
+  outfile->Printf("        Number of frozen virtual orbitals:      %5i\n",
+                  nfrzv_);
+  outfile->Printf("\n");
+
+  outfile->Printf("\n");
+  outfile->Printf("  ==> Memory requirements <==\n");
+  outfile->Printf("\n");
+  int nd2 = 0;
+  int ng2 = 0;
+  int nt1 = 0;
+  int nt2 = 0;
+  int maxgem = 0;
+  for (int h = 0; h < nirrep_; h++) {
+    nd2 += gems_ab[h] * gems_ab[h];
+    nd2 += 2 * gems_aa[h] * gems_aa[h];
+
+    ng2 += gems_ab[h] * gems_ab[h];     // G2ab
+    ng2 += gems_ab[h] * gems_ab[h];     // G2ba
+    ng2 += 4 * gems_ab[h] * gems_ab[h]; // G2aa
+
+    if (gems_ab[h] > maxgem) {
+      maxgem = gems_ab[h];
+    }
+    if (constrain_g2_) {
+      if (2 * gems_ab[h] > maxgem) {
+        maxgem = 2 * gems_ab[h];
+      }
     }
 
-    // print orbitals per irrep in each space
-    outfile->Printf("  ==> Active space details <==\n");
-    outfile->Printf("\n");
-    outfile->Printf("        Number of frozen core orbitals:         %5i\n",nfrzc_);
-    outfile->Printf("        Number of restricted occupied orbitals: %5i\n",nrstc_);
-    outfile->Printf("        Number of active occupied orbitals:     %5i\n",(int)nalpha_);
-    outfile->Printf("        Number of active virtual orbitals:      %5i\n",nmo_-(int)nalpha_);
-    outfile->Printf("        Number of restricted virtual orbitals:  %5i\n",nrstv_);
-    outfile->Printf("        Number of frozen virtual orbitals:      %5i\n",nfrzv_);
-    outfile->Printf("\n");
+    if (constrain_t1_) {
+      nt1 += trip_aaa[h] * trip_aaa[h]; // T1aaa
+      nt1 += trip_aaa[h] * trip_aaa[h]; // T1bbb
+      nt1 += trip_aab[h] * trip_aab[h]; // T1aab
+      nt1 += trip_aab[h] * trip_aab[h]; // T1bba
+      if (trip_aab[h] > maxgem) {
+        maxgem = trip_aab[h];
+      }
+    }
 
-    outfile->Printf("\n");
-    outfile->Printf("  ==> Memory requirements <==\n");
-    outfile->Printf("\n");
-    int nd2   = 0;
-    int ng2    = 0;
-    int nt1    = 0;
-    int nt2    = 0;
-    int maxgem = 0;
+    if (constrain_t2_) {
+      nt2 += (trip_aab[h] + trip_aba[h]) * (trip_aab[h] + trip_aba[h]); // T2aaa
+      nt2 += (trip_aab[h] + trip_aba[h]) * (trip_aab[h] + trip_aba[h]); // T2bbb
+      nt2 += trip_aab[h] * trip_aab[h];                                 // T2aab
+      nt2 += trip_aab[h] * trip_aab[h];                                 // T2bba
+
+      if (trip_aab[h] + trip_aaa[h] > maxgem) {
+        maxgem = trip_aab[h] + trip_aaa[h];
+      }
+    }
+  }
+
+  outfile->Printf("        D2:                       %7.2lf mb\n",
+                  nd2 * 8.0 / 1024.0 / 1024.0);
+  if (constrain_q2_) {
+    outfile->Printf("        Q2:                       %7.2lf mb\n",
+                    nd2 * 8.0 / 1024.0 / 1024.0);
+  }
+  if (constrain_g2_) {
+    outfile->Printf("        G2:                       %7.2lf mb\n",
+                    ng2 * 8.0 / 1024.0 / 1024.0);
+  }
+  if (constrain_d3_) {
+    outfile->Printf("        D3:                       %7.2lf mb\n",
+                    nt1 * 8.0 / 1024.0 / 1024.0);
+  }
+  if (constrain_d4_) {
+    outfile->Printf("        D4:                       %7.2lf mb\n",
+                    nt1 * 8.0 / 1024.0 / 1024.0);
+  }
+  if (constrain_t1_) {
+    outfile->Printf("        T1:                       %7.2lf mb\n",
+                    nt1 * 8.0 / 1024.0 / 1024.0);
+  }
+  if (constrain_t2_) {
+    outfile->Printf("        T2:                       %7.2lf mb\n",
+                    nt2 * 8.0 / 1024.0 / 1024.0);
+  }
+  outfile->Printf("\n");
+
+  // we have 4 arrays the size of x and 4 the size of y
+  // in addition, we need to store 3 times whatever the largest
+  // block of x is for the diagonalization step
+  // integrals:
+  //     K2a, K2b
+  // casscf:
+  //     4-index integrals (no permutational symmetry)
+  //     3-index integrals
+
+  double tot = 4.0 * n_primal_ + 4.0 * n_dual_ + 3.0 * maxgem * maxgem;
+  tot += nd2; // for K2a, K2b
+
+  // for casscf, need d2 and 3- or 4-index integrals
+
+  // storage requirements for full d2
+  for (int h = 0; h < nirrep_; h++) {
+    tot += gems_plus_core[h] * (gems_plus_core[h] + 1) / 2;
+  }
+
+  if (is_df_) {
+    // storage requirements for df integrals
+    nQ_ = Process::environment.globals["NAUX (SCF)"];
+    if ((options_.get_str("SCF_TYPE") == "DF" ||
+         options_.get_str("SCF_TYPE") == "DISK_DF" ||
+         options_.get_str("SCF_TYPE") == "MEM_DF")) {
+      std::shared_ptr<BasisSet> primary = reference_wavefunction_->basisset();
+      std::shared_ptr<BasisSet> auxiliary =
+          reference_wavefunction_->get_basisset("DF_BASIS_SCF");
+
+      nQ_ = auxiliary->nbf();
+      Process::environment.globals["NAUX (SCF)"] = nQ_;
+    }
+    tot += (long int)nQ_ * (long int)nmo_ * ((long int)nmo_ + 1) / 2;
+  } else {
+    // storage requirements for four-index integrals
     for (int h = 0; h < nirrep_; h++) {
-        nd2 +=     gems_ab[h]*gems_ab[h];
-        nd2 += 2 * gems_aa[h]*gems_aa[h];
-
-        ng2 +=     gems_ab[h] * gems_ab[h]; // G2ab
-        ng2 +=     gems_ab[h] * gems_ab[h]; // G2ba
-        ng2 += 4 * gems_ab[h] * gems_ab[h]; // G2aa
-
-        if ( gems_ab[h] > maxgem ) {
-            maxgem = gems_ab[h];
-        }
-        if ( constrain_g2_ ) {
-            if ( 2*gems_ab[h] > maxgem ) {
-                maxgem = 2*gems_ab[h];
-            }
-        }
-
-        if ( constrain_t1_ ) {
-            nt1 += trip_aaa[h] * trip_aaa[h]; // T1aaa
-            nt1 += trip_aaa[h] * trip_aaa[h]; // T1bbb
-            nt1 += trip_aab[h] * trip_aab[h]; // T1aab
-            nt1 += trip_aab[h] * trip_aab[h]; // T1bba
-            if ( trip_aab[h] > maxgem ) {
-                maxgem = trip_aab[h];
-            }
-        }
-
-        if ( constrain_t2_ ) {
-            nt2 += (trip_aab[h]+trip_aba[h]) * (trip_aab[h]+trip_aba[h]); // T2aaa
-            nt2 += (trip_aab[h]+trip_aba[h]) * (trip_aab[h]+trip_aba[h]); // T2bbb
-            nt2 += trip_aab[h] * trip_aab[h]; // T2aab
-            nt2 += trip_aab[h] * trip_aab[h]; // T2bba
-
-            if ( trip_aab[h]+trip_aaa[h] > maxgem ) {
-                maxgem = trip_aab[h]+trip_aaa[h];
-            }
-        }
-
+      tot += (long int)gems_full[h] * ((long int)gems_full[h] + 1L) / 2L;
     }
+  }
 
-    outfile->Printf("        D2:                       %7.2lf mb\n",nd2 * 8.0 / 1024.0 / 1024.0);
-    if ( constrain_q2_ ) {
-        outfile->Printf("        Q2:                       %7.2lf mb\n",nd2 * 8.0 / 1024.0 / 1024.0);
-    }
-    if ( constrain_g2_ ) {
-        outfile->Printf("        G2:                       %7.2lf mb\n",ng2 * 8.0 / 1024.0 / 1024.0);
-    }
-    if ( constrain_d3_ ) {
-        outfile->Printf("        D3:                       %7.2lf mb\n",nt1 * 8.0 / 1024.0 / 1024.0);
-    }
-    if ( constrain_d4_ ) {
-        outfile->Printf("        D4:                       %7.2lf mb\n",nt1 * 8.0 / 1024.0 / 1024.0);
-    }
-    if ( constrain_t1_ ) {
-        outfile->Printf("        T1:                       %7.2lf mb\n",nt1 * 8.0 / 1024.0 / 1024.0);
-    }
-    if ( constrain_t2_ ) {
-        outfile->Printf("        T2:                       %7.2lf mb\n",nt2 * 8.0 / 1024.0 / 1024.0);
+  // memory available after allocating all we need for v2RDM-CASSCF
+  available_memory_ = memory_ - tot * 8L;
+
+  outfile->Printf("        Total number of variables:     %10li\n", n_primal_);
+  outfile->Printf("        Total number of constraints:   %10li\n", n_dual_);
+  outfile->Printf("        Total memory requirements:     %7.2lf mb\n",
+                  tot * 8.0 / 1024.0 / 1024.0);
+  outfile->Printf("\n");
+
+  if (tot * 8.0 > (double)memory_) {
+    outfile->Printf("\n");
+    outfile->Printf("        Not enough memory!\n");
+    outfile->Printf("\n");
+    if (!is_df_) {
+      outfile->Printf(
+          "        Either increase the available memory by %7.2lf mb\n",
+          (8.0 * tot - memory_) / 1024.0 / 1024.0);
+      outfile->Printf("        or try scf_type = df or scf_type = cd\n");
+
+    } else {
+      outfile->Printf("        Increase the available memory by %7.2lf mb.\n",
+                      (8.0 * tot - memory_) / 1024.0 / 1024.0);
     }
     outfile->Printf("\n");
+    throw PsiException("Not enough memory", __FILE__, __LINE__);
+  }
 
-    // we have 4 arrays the size of x and 4 the size of y
-    // in addition, we need to store 3 times whatever the largest
-    // block of x is for the diagonalization step
-    // integrals:
-    //     K2a, K2b
-    // casscf:
-    //     4-index integrals (no permutational symmetry)
-    //     3-index integrals
-
-    double tot = 4.0*n_primal_ + 4.0*n_dual_ + 3.0*maxgem*maxgem;
-    tot += nd2; // for K2a, K2b
-
-    // for casscf, need d2 and 3- or 4-index integrals
-
-    // storage requirements for full d2
-    for (int h = 0; h < nirrep_; h++) {
-        tot += gems_plus_core[h] * ( gems_plus_core[h] + 1 ) / 2;
-    }
-
-    if ( is_df_ ) {
-        // storage requirements for df integrals
-        nQ_ = Process::environment.globals["NAUX (SCF)"];
-        if ( options_.get_str("SCF_TYPE") == "DF" ) {
-            std::shared_ptr<BasisSet> primary = reference_wavefunction_->basisset();
-            std::shared_ptr<BasisSet> auxiliary = reference_wavefunction_->get_basisset("DF_BASIS_SCF");
-
-            nQ_ = auxiliary->nbf();
-            Process::environment.globals["NAUX (SCF)"] = nQ_;
-        }
-        tot += (long int)nQ_*(long int)nmo_*((long int)nmo_+1)/2;
-    }else {
-        // storage requirements for four-index integrals
-        for (int h = 0; h < nirrep_; h++) {
-            tot += (long int)gems_full[h] * ( (long int)gems_full[h] + 1L ) / 2L;
-        }
-    }
-
-    // memory available after allocating all we need for v2RDM-CASSCF
-    available_memory_ = memory_ - tot * 8L;
-
-    outfile->Printf("        Total number of variables:     %10i\n",n_primal_);
-    outfile->Printf("        Total number of constraints:   %10i\n",n_dual_);
-    outfile->Printf("        Total memory requirements:     %7.2lf mb\n",tot * 8.0 / 1024.0 / 1024.0);
-    outfile->Printf("\n");
-
-    if ( tot * 8.0 > (double)memory_ ) {
-        outfile->Printf("\n");
-        outfile->Printf("        Not enough memory!\n");
-        outfile->Printf("\n");
-        if ( !is_df_ ) {
-            outfile->Printf("        Either increase the available memory by %7.2lf mb\n",(8.0 * tot - memory_)/1024.0/1024.0);
-            outfile->Printf("        or try scf_type = df or scf_type = cd\n");
-
-        }else {
-            outfile->Printf("        Increase the available memory by %7.2lf mb.\n",(8.0 * tot - memory_)/1024.0/1024.0);
-        }
-        outfile->Printf("\n");
-        throw PsiException("Not enough memory",__FILE__,__LINE__);
-    }
-
-    orbopt_transformation_matrix_ = (double*)malloc((nmo_-nfrzc_-nfrzv_)*(nmo_-nfrzc_-nfrzv_)*sizeof(double));
-    memset((void*)orbopt_transformation_matrix_,'\0',(nmo_-nfrzc_-nfrzv_)*(nmo_-nfrzc_-nfrzv_)*sizeof(double));
-    for (int i = 0; i < nmo_-nfrzc_-nfrzv_; i++) {
-        orbopt_transformation_matrix_[i*(nmo_-nfrzc_-nfrzv_)+i] = 1.0;
-    }
-
+  orbopt_transformation_matrix_ = (double *)malloc(
+      (nmo_ - nfrzc_ - nfrzv_) * (nmo_ - nfrzc_ - nfrzv_) * sizeof(double));
+  memset((void *)orbopt_transformation_matrix_, '\0',
+         (nmo_ - nfrzc_ - nfrzv_) * (nmo_ - nfrzc_ - nfrzv_) * sizeof(double));
+  for (int i = 0; i < nmo_ - nfrzc_ - nfrzv_; i++) {
+    orbopt_transformation_matrix_[i * (nmo_ - nfrzc_ - nfrzv_) + i] = 1.0;
+  }
 }
 
-int v2RDMSolver::SymmetryPair(int i,int j) {
-    return table[i*8+j];
-}
-int v2RDMSolver::TotalSym(int i,int j,int k, int l) {
-    return SymmetryPair(SymmetryPair(symmetry[i],symmetry[j]),SymmetryPair(symmetry[k],symmetry[l]));
+int v2RDMSolver::SymmetryPair(int i, int j) { return table[i * 8 + j]; }
+int v2RDMSolver::TotalSym(int i, int j, int k, int l) {
+  return SymmetryPair(SymmetryPair(symmetry[i], symmetry[j]),
+                      SymmetryPair(symmetry[k], symmetry[l]));
 }
 
 // compute the energy!
 double v2RDMSolver::compute_energy() {
 
+  double start_total_time = omp_get_wtime();
 
-    double start_total_time = omp_get_wtime();
+  // print guess orbitals in molden format
+  if (options_.get_bool("GUESS_ORBITALS_WRITE") && !is_hubbard_ &&
+      !is_external_hamiltonian_) {
+    outfile->Printf(
+        "Warning: GUESS_ORBITALS_WRITE is not supported in C++ with Psi4 "
+        "v1.10. Use Python's psi4.driver.molden function instead.\n");
+    /*
+    std::shared_ptr<MoldenWriter> molden(new
+    MoldenWriter(reference_wavefunction_)); std::shared_ptr<Vector> zero =
+    std::make_shared<Vector>(nmopi_); zero->zero(); std::string filename =
+    get_writer_file_prefix(reference_wavefunction_->molecule()->name()) +
+    ".guess.molden";
 
-    // print guess orbitals in molden format
-    if ( options_.get_bool("GUESS_ORBITALS_WRITE") && !is_hubbard_ && !is_external_hamiltonian_) {
+    Ca_ = SharedMatrix(reference_wavefunction_->Ca());
+    Cb_ = SharedMatrix(reference_wavefunction_->Cb());
 
-        std::shared_ptr<MoldenWriter> molden(new MoldenWriter(reference_wavefunction_));
-        std::shared_ptr<Vector> zero = std::make_shared<Vector>(nmopi_);
-        zero->zero();
-        std::string filename = get_writer_file_prefix(reference_wavefunction_->molecule()->name()) + ".guess.molden";
+    SharedVector occupation_a = std::make_shared<Vector>(nmopi_);
+    SharedVector occupation_b = std::make_shared<Vector>(nmopi_);
 
-        Ca_ = SharedMatrix(reference_wavefunction_->Ca());
-        Cb_ = SharedMatrix(reference_wavefunction_->Cb());
-
-        SharedVector occupation_a = std::make_shared<Vector>(nmopi_);
-        SharedVector occupation_b = std::make_shared<Vector>(nmopi_);
-
-        for (int h = 0; h < nirrep_; h++) {
-            for (int i = 0; i < nalphapi_[h]; i++) {
-                occupation_a->set(h, i, 1.0);
-            }
-            for (int i = 0; i < nbetapi_[h]; i++) {
-                occupation_b->set(h, i, 1.0);
-            }
+    for (int h = 0; h < nirrep_; h++) {
+        for (int i = 0; i < nalphapi_[h]; i++) {
+            occupation_a->set(h, i, 1.0);
         }
-
-        molden->write(filename, Ca_, Cb_, zero, zero, occupation_a, occupation_b, true);
+        for (int i = 0; i < nbetapi_[h]; i++) {
+            occupation_b->set(h, i, 1.0);
+        }
     }
 
-    // hartree-fock guess
-    Guess();
+    molden->write(filename, Ca_, Cb_, zero, zero, occupation_a, occupation_b,
+    true);
+    */
+  }
 
-    // checkpoint file
-    if ( options_.get_str("RESTART_FROM_CHECKPOINT_FILE") != "" && !is_hubbard_ && !is_external_hamiltonian_) {
-        ReadFromCheckpointFile();
+  std::string checkpoint_write_mode = options_.get_str("CHECKPOINT_WRITE_MODE");
+  bool write_checkpoint_each_step =
+      options_.get_bool("WRITE_CHECKPOINT_FILE") &&
+      checkpoint_write_mode == "EACH_STEP";
+
+  // hartree-fock guess
+  Guess();
+
+  // checkpoint file
+  if (options_.get_str("RESTART_FROM_CHECKPOINT_FILE") != "" && !is_hubbard_ &&
+      !is_external_hamiltonian_) {
+    ReadFromCheckpointFile();
+  }
+
+  // get integrals
+  GetIntegrals();
+
+  // TEST
+  // constrain_gpc_ = false;
+
+  // generate constraint vector
+  BuildConstraints();
+
+  // iterate
+  int orbopt_iter = 0;
+
+  int local_maxiter = options_.get_bool("OPTIMIZE_ORBITALS")
+                          ? options_.get_int("ORBOPT_FREQUENCY")
+                          : options_.get_int("MAXITER");
+
+  bool no_more_orbital_rotations = false;
+  sdp_primal_error_ = 1.0;
+  sdp_dual_error_ = 1.0;
+
+
+
+  // need to define progress monitor function
+  libsdp::SDPProgressMonitorFunction sdp_monitor;
+  if (options_.get_str("SDP_SOLVER") == "BPSDP") {
+    sdp_monitor = bpsdp_monitor;
+  } else if (options_.get_str("SDP_SOLVER") == "RRSDP") {
+    sdp_monitor = rrsdp_monitor;
+  } else if (options_.get_str("SDP_SOLVER") == "CVXPY") {
+    sdp_monitor = bpsdp_monitor;
+  } else if (options_.get_str("SDP_SOLVER") == "GPU_ADMM") {
+    sdp_monitor = bpsdp_monitor;
+  }
+
+  auto remaining_sdp_iterations = [&]() -> int {
+    long int remaining =
+        (long int)options_.get_int("MAXITER") - sdp_->oiter_total();
+    if (remaining <= 0) {
+      return 0;
     }
+    return remaining > std::numeric_limits<int>::max()
+               ? std::numeric_limits<int>::max()
+               : (int)remaining;
+  };
 
-    // get integrals
-    GetIntegrals();
+  auto capped_sdp_iterations = [&](int requested) -> int {
+    int remaining = remaining_sdp_iterations();
+    if (remaining <= 0) {
+      return 0;
+    }
+    return requested < remaining ? requested : remaining;
+  };
 
-// TEST
-    //constrain_gpc_ = false;
-
-    // generate constraint vector
+  // for GPC, start with partially solved ensemble problem first, then modify
+  // penalty update protocol
+  if (constrain_gpc_) {
+    constrain_gpc_ = false;
     BuildConstraints();
 
-    // iterate
-    int orbopt_iter = 0;
+    print_header();
+#ifdef USING_PCMSolver
+    update_pcm();
+#endif
+    int capped_maxiter = capped_sdp_iterations(local_maxiter);
+    if (capped_maxiter <= 0) {
+      outfile->Printf(
+          "            Total SDP iterations (%ld) reached MAXITER (%d). "
+          "Skipping initial GPC SDP solve.\n",
+          sdp_->oiter_total(), options_.get_int("MAXITER"));
+    } else if (capped_maxiter < local_maxiter) {
+      outfile->Printf(
+          "            Capping SDP solve chunk from %d to %d iterations "
+          "to respect MAXITER (%d).\n",
+          local_maxiter, capped_maxiter, options_.get_int("MAXITER"));
+    }
+    if (capped_maxiter > 0) {
+      sdp_->solve(x->pointer(), b->pointer(), c->pointer(), dimensions_,
+                  capped_maxiter, evaluate_Au, evaluate_ATu, sdp_monitor, 1,
+                  (void *)this);
+    }
+    constrain_gpc_ = true;
+    BuildConstraints();
 
-    int local_maxiter = options_.get_bool("OPTIMIZE_ORBITALS") ? options_.get_int("ORBOPT_FREQUENCY") : options_.get_int("MU_UPDATE_FREQUENCY");
-    if ( is_hubbard_ || is_external_hamiltonian_ ) {
-        local_maxiter = options_.get_int("MU_UPDATE_FREQUENCY");
+    // some of these are only valid for rrsdp ... for bpsdp we'll get an
+    // exception
+    sdp_->set_mu(1.0);
+    sdp_->set_mu_reset(false);
+    sdp_->set_mu_scale_factor(0.99);
+
+    local_maxiter = 1;
+  }
+
+  double previous_total_energy = 1.0e9;
+  int macro_iter = 0;
+
+  do {
+
+    if (constrain_gpc_) {
+      set_gpc_rdm_nrm();
+      for (int my_state = 0; my_state < n_gpc_states_; my_state++) {
+        SortedNaturalOrbitals(my_state);
+      }
     }
 
-
-    // need to define progress monitor function
-    libsdp::SDPProgressMonitorFunction sdp_monitor;
-    if ( options_.get_str("SDP_SOLVER") == "BPSDP" ) {
-        sdp_monitor = bpsdp_monitor;
-    }else if ( options_.get_str("SDP_SOLVER") == "RRSDP" ) {
-        sdp_monitor = rrsdp_monitor;
+    print_header();
+#ifdef USING_PCMSolver
+    update_pcm();
+#endif
+    int capped_maxiter = capped_sdp_iterations(local_maxiter);
+    if (capped_maxiter <= 0) {
+      outfile->Printf(
+          "            Total SDP iterations (%ld) reached MAXITER (%d). "
+          "Terminating CASSCF.\n",
+          sdp_->oiter_total(), options_.get_int("MAXITER"));
+      break;
+    } else if (capped_maxiter < local_maxiter) {
+      outfile->Printf(
+          "            Capping SDP solve chunk from %d to %d iterations "
+          "to respect MAXITER (%d).\n",
+          local_maxiter, capped_maxiter, options_.get_int("MAXITER"));
     }
+    sdp_->solve(x->pointer(), b->pointer(), c->pointer(), dimensions_,
+                capped_maxiter, evaluate_Au, evaluate_ATu, sdp_monitor, 1,
+                (void *)this);
 
-    // for GPC, start with partially solved ensemble problem first, then modify penalty update protocol
-    if ( constrain_gpc_ ) {
-        constrain_gpc_ = false;
-        BuildConstraints();
+    bool run_orbopt = !no_more_orbital_rotations;
 
-        print_header();
-        sdp_->solve(x->pointer(), b->pointer(), c->pointer(), dimensions_, local_maxiter, evaluate_Au, evaluate_ATu, sdp_monitor, 1, (void*)this);
-        constrain_gpc_ = true;
-        BuildConstraints();
+    bool ran_orbopt = false;
+    if (options_.get_bool("OPTIMIZE_ORBITALS") && !is_hubbard_ &&
+        !is_external_hamiltonian_ && orbopt_iter_total_ < scf_maxiter_ && run_orbopt) {
 
-        // some of these are only valid for rrsdp ... for bpsdp we'll get an exception
-        sdp_->set_mu(1.0);
-        sdp_->set_mu_reset(false);
-        sdp_->set_mu_scale_factor(0.99);
+      double start = omp_get_wtime();
+      int saved_orbopt_maxiter = (int)orbopt_data_[8];
+      if (options_.get_bool("ORBOPT_ADAPTIVE_MAXITER") &&
+          saved_orbopt_maxiter > 0) {
+        int active_orbopt_maxiter =
+            options_.get_int("ORBOPT_ADAPTIVE_START_MAXITER");
+        int final_orbopt_maxiter =
+            options_.get_int("ORBOPT_ADAPTIVE_FINAL_MAXITER");
+        double switch_gradient =
+            options_.get_double("ORBOPT_ADAPTIVE_SWITCH_GRADIENT");
 
-        local_maxiter = 1;
-    }
-
-    do {
-
-        if ( constrain_gpc_ ) {
-            set_gpc_rdm_nrm();
-            for (int my_state = 0; my_state < n_gpc_states_; my_state++) {
-                SortedNaturalOrbitals(my_state);
-            }
+        if (active_orbopt_maxiter <= 0) {
+          active_orbopt_maxiter = saved_orbopt_maxiter;
+        }
+        if (final_orbopt_maxiter <= 0) {
+          final_orbopt_maxiter = saved_orbopt_maxiter;
         }
 
-        print_header();
-        sdp_->solve(x->pointer(), b->pointer(), c->pointer(), dimensions_, local_maxiter, evaluate_Au, evaluate_ATu, sdp_monitor, 1, (void*)this);
-
-        if ( options_.get_bool("OPTIMIZE_ORBITALS") && !is_hubbard_  && !is_external_hamiltonian_ && orbopt_iter_total_ < scf_maxiter_ ) {
-    
-            double start = omp_get_wtime();
-            RotateOrbitals();
-            double end = omp_get_wtime();
-    
-            orbopt_time_  += end - start;
-            orbopt_iter_total_++;
-
-            double energy_primal = C_DDOT(n_primal_,c->pointer(),1,x->pointer(),1);
-            outfile->Printf("            Total energy: %20.12lf\n",energy_primal+enuc_+efzc_);
-
-            if ( options_.get_bool("SAVE_SCF") && !is_hubbard_ && !is_external_hamiltonian_ ) {
-                WriteMoldenFile();
-            }
-
-
-        }else {
-            orbopt_converged_ = true;
+        bool use_refinement_maxiter = false;
+        if (switch_gradient > 0.0 && orbopt_iter_total_ > 0 &&
+            fabs(orbopt_data_[11]) <= switch_gradient) {
+          use_refinement_maxiter = true;
+        }
+        if (orbopt_iter_total_ + 1 >= scf_maxiter_) {
+          use_refinement_maxiter = true;
         }
 
-        outfile->Printf("\n");
-
-    }while( !orbopt_converged_ || !sdp_->is_converged() );
-
-    //free(tmp);
-
-    outfile->Printf("\n");
-    outfile->Printf("      v2RDM iterations converged!\n");
-    outfile->Printf("\n");
-
-    // evaluate spin squared
-    double s2 = 0.0;
-    double * x_p = x->pointer();
-    for (int i = 0; i < amo_; i++){
-        for (int j = 0; j < amo_; j++){
-            int h = SymmetryPair(symmetry[i],symmetry[j]);
-            int ij = ibas_ab_sym[h][i][j];
-            int ji = ibas_ab_sym[h][j][i];
-            s2 += x_p[d2aboff[h] + ij*gems_ab[h]+ji];
+        if (use_refinement_maxiter) {
+          active_orbopt_maxiter = final_orbopt_maxiter;
         }
-    }
-    double na = nalpha_ - nfrzc_ - nrstc_;
-    double nb = nbeta_ - nfrzc_ - nrstc_;
-    double ms = (multiplicity_ - 1.0)/2.0;
-
-    // set energy for wavefunction
-    double energy_primal = C_DDOT(n_primal_,c->pointer(),1,x->pointer(),1);
-    energy_ = energy_primal+enuc_+efzc_;
-
-    // push final transformation matrix onto Ca_ and Cb_
-    UpdateTransformationMatrix();
-
-    energy_primal = C_DDOT(n_primal_,c->pointer(),1,x->pointer(),1);
-
-    // break down energy into one- and two-electron components
-
-    outfile->Printf("      na:                        %20.6lf\n", na);
-    outfile->Printf("      nb:                        %20.6lf\n", nb);
-    outfile->Printf("      v2RDM total spin [S(S+1)]: %20.6lf\n", 0.5 * (na + nb) + ms*ms - s2);
-    outfile->Printf("\n");
-    if ( !is_hubbard_ && !is_external_hamiltonian_ ) {
-        double kinetic, potential, two_electron_energy;
-        EnergyByComponent(kinetic,potential,two_electron_energy);
-
-        outfile->Printf("      Nuclear Repulsion Energy:          %20.12lf\n",enuc_);
-        outfile->Printf("      Two-Electron Energy:               %20.12lf\n",two_electron_energy);
-        outfile->Printf("      Kinetic Energy:                    %20.12lf\n",kinetic);
-        outfile->Printf("      Electron-Nuclear Potential Energy: %20.12lf\n",potential);
-    }else {
-        double two_electron_energy = 0.0;
-        for (int h = 0; h < nirrep_; h++) {
-            two_electron_energy += C_DDOT(gems_ab[h] * gems_ab[h], x_p + d2aboff[h],1, c->pointer() + d2aboff[h], 1);
-            two_electron_energy += C_DDOT(gems_aa[h] * gems_aa[h], x_p + d2aaoff[h],1, c->pointer() + d2aaoff[h], 1);
-            two_electron_energy += C_DDOT(gems_aa[h] * gems_aa[h], x_p + d2bboff[h],1, c->pointer() + d2bboff[h], 1);
+        if (active_orbopt_maxiter > saved_orbopt_maxiter) {
+          active_orbopt_maxiter = saved_orbopt_maxiter;
         }
-        double one_electron_energy = 0.0;
-        for (int h = 0; h < nirrep_; h++) {
-            one_electron_energy += C_DDOT(amopi_[h] * amopi_[h], x_p + d1aoff[h],1, c->pointer() + d1aoff[h], 1);
-            one_electron_energy += C_DDOT(amopi_[h] * amopi_[h], x_p + d1boff[h],1, c->pointer() + d1boff[h], 1);
+        if (active_orbopt_maxiter < 1) {
+          active_orbopt_maxiter = 1;
         }
-        outfile->Printf("      Two-Electron Energy:               %20.12lf\n",two_electron_energy);
-        outfile->Printf("      One-Electron Energy:               %20.12lf\n",one_electron_energy);
-    }
 
-    outfile->Printf("\n");
-    outfile->Printf("    * v2RDM total energy:                %20.12lf\n",energy_primal+enuc_+efzc_);
-    outfile->Printf("\n");
+        outfile->Printf(
+            "            Adaptive orbital maxiter: using %d of %d "
+            "(orbital step %d)\n",
+            active_orbopt_maxiter, saved_orbopt_maxiter,
+            orbopt_iter_total_ + 1);
+        orbopt_data_[8] = (double)active_orbopt_maxiter;
+      }
+      RotateOrbitals();
+      orbopt_data_[8] = (double)saved_orbopt_maxiter;
+      double end = omp_get_wtime();
 
-    Process::environment.globals["CURRENT ENERGY"]     = energy_primal+enuc_+efzc_;
-    Process::environment.globals["v2RDM TOTAL ENERGY"] = energy_primal+enuc_+efzc_;
+      orbopt_time_ += end - start;
+      orbopt_iter_total_++;
+      ran_orbopt = true;
 
-    if ( options_.get_bool("SEMICANONICALIZE_ORBITALS") ) {
-        if ( options_.get_str("DERTYPE") == "FIRST" ) {
-            outfile->Printf("\n");
-            outfile->Printf("    <<< WARNING >>> skipping orbital semicanonicalization (blame gradients)\n");
-            outfile->Printf("\n");
-        }else {
-
-            //printf("primal energy before semicanonicalization: %20.12lf\n",energy_primal+efzc_);
-            orbopt_data_[8] = -2.0;
-            RotateOrbitals();
-
-            // push final transformation matrix onto Ca_ and Cb_
-            UpdateTransformationMatrix();
-
-        }
-    } 
-
-    // compute and natural orbitals and transform 1-RDM/2-RDM to the NO basis
-    if (  options_.get_bool("NAT_ORBS") || 
-          options_.get_bool("FCIDUMP")  || 
-          options_.get_bool("EXTENDED_KOOPMANS") ) {
-
-        if ( !options_.get_bool("PRINT_RDMS") ) { // protect function printing rdms not transformed to no basis
-            ComputeNaturalOrbitals();
-        }  
-
-    }
-    if ( options_.get_bool("MOLDEN_WRITE") && !is_hubbard_ && !is_external_hamiltonian_ ) {
+      if (options_.get_bool("SAVE_SCF") && !is_hubbard_ &&
+          !is_external_hamiltonian_) {
         WriteMoldenFile();
-    }
-    if ( options_.get_bool("EXTENDED_KOOPMANS") && !is_hubbard_ && !is_external_hamiltonian_ ) {
-        ExtendedKoopmans();
-    }
-    if ( options_.get_bool("FCIDUMP") && !is_hubbard_ && !is_external_hamiltonian_ ) {
-        FCIDUMP();
-    }
-    if ( options_.get_bool("PRINT_RDMS") ) {
-        print_rdms();
+      }
+
+    } else {
+      if (!options_.get_bool("OPTIMIZE_ORBITALS") || orbopt_iter_total_ >= scf_maxiter_ || no_more_orbital_rotations) {
+        orbopt_converged_ = true;
+      }
     }
 
-    // compute and print natural orbital occupation numbers 
-    PrintNaturalOrbitalOccupations();
+    if (ran_orbopt) {
+      double energy_primal = C_DDOT(n_primal_, c->pointer(), 1, x->pointer(), 1);
+      double total_energy = energy_primal + enuc_ + efzc_;
+#ifdef USING_PCMSolver
+      if (PCM_enabled()) {
+        total_energy -= Tr_D_Vpcm_;
+        total_energy += E_pcm_;
+      }
+#endif
+      outfile->Printf("            Total energy: %20.12lf\n", total_energy);
 
-    // push OPDM onto wavefunction object
-    FinalizeOPDM();
+      double total_energy_change = 0.0;
+      if (macro_iter > 0) {
+        total_energy_change = total_energy - previous_total_energy;
+        outfile->Printf("            Change in total energy: %20.12lf\n", total_energy_change);
+      }
 
-    // write tpdm to disk?
-    if ( options_.get_bool("TPDM_WRITE") ) {
-        WriteActiveTPDM();
-    }
-    if ( options_.get_bool("TPDM_WRITE_FULL") ) {
-        WriteTPDM();
-        //ReadTPDM();
-    }
-    if ( options_.get_bool("TPDM_WRITE_SPIN_FREE") ) {
-        WriteTPDMSpinFree();
-        //ReadTPDM();
-    }
-    if ( options_.get_bool("OPDM_WRITE_FULL") ) {
-        WriteOPDM();
-    }
-    // write 3-particle density matrix to disk?
-    if ( options_.get_bool("3PDM_WRITE") && options_.get_bool("CONSTRAIN_D3")) {
-        WriteActive3PDM();
-        //Read3PDM();
-    }
-
-    // for derivatives:
-    if ( options_.get_str("DERTYPE") == "FIRST" ) {
-
-        if ( options_.get_bool("NAT_ORBS") || options_.get_bool("FCIDUMP") || options_.get_bool("EXTENDED_KOOPMANS") ) {
-            throw PsiException("analytic gradients require nat_orbs false",__FILE__,__LINE__);
-        }
-
-        // write checkpoint file for next step in optimization
-        WriteCheckpointFile();
-
-        // build orbital lagrangian 
-        orbopt_data_[8] = -1.0;
-        RotateOrbitals();
-
-        // write 2-RDM in IWL format
-        WriteTPDM_IWL();
-
-        // push orbital lagrangian onto wave function
-        OrbitalLagrangian();
-
-    }else if ( options_.get_bool("WRITE_CHECKPOINT_FILE") ) {
-
-        WriteCheckpointFile();
-
+      double e_conv = options_.get_double("E_CONVERGENCE");
+      if (macro_iter > 0 && fabs(total_energy_change) < 0.1 * e_conv && !sdp_->is_converged()) {
+        outfile->Printf("            Change in total energy (%5.3le) is less than 0.1 * E_CONVERGENCE (%5.3le).\n", fabs(total_energy_change), 0.1 * e_conv);
+        outfile->Printf("            Disabling further orbital rotations. Solving SDP to convergence.\n");
+        no_more_orbital_rotations = true;
+        orbopt_converged_ = true;
+      }
     }
 
-// TEST
-    //constrain_gpc_ = true;
+    double energy_primal = C_DDOT(n_primal_, c->pointer(), 1, x->pointer(), 1);
+    double total_energy = energy_primal + enuc_ + efzc_;
+#ifdef USING_PCMSolver
+    if (PCM_enabled()) {
+      total_energy -= Tr_D_Vpcm_;
+      total_energy += E_pcm_;
+    }
+#endif
 
-    if ( constrain_gpc_ ) {
-        // print errors in generalized pauli constraints:
-        print_gpc_error_ = true;
-        constrain_gpc_ = true;
-        BuildConstraints();
-        std::shared_ptr<Vector> Ax (new Vector(n_dual_));
-        set_gpc_rdm_nrm();
-        for (int my_state = 0; my_state < n_gpc_states_; my_state++) {
-            SortedNaturalOrbitals(my_state);
-            for (int i = 0; i < n_gpc_[my_state]; i++) {
-                x->pointer()[gpcoff[my_state][i]] = 0.0;
-            }
-        }
-        offset = 0;
-        bpsdp_Au(Ax->pointer(),x->pointer());
-        print_gpc_error_ = false;
+    if (ran_orbopt) {
+      if ((options_.get_str("SDP_SOLVER") == "BPSDP" || options_.get_str("SDP_SOLVER") == "GPU_ADMM") && macro_iter > 0 && total_energy >= previous_total_energy) {
+        outfile->Printf("            WARNING: SDP energy did not decrease (previous: %20.12lf, current: %20.12lf). Continuing CASSCF.\n", previous_total_energy, total_energy);
+      }
+      previous_total_energy = total_energy;
+      macro_iter++;
     }
 
-    double end_total_time = omp_get_wtime();
+    if (sdp_->oiter_total() >= options_.get_int("MAXITER")) {
+      outfile->Printf("            Total SDP iterations (%ld) reached MAXITER (%d). Terminating CASSCF.\n", sdp_->oiter_total(), options_.get_int("MAXITER"));
+      break;
+    }
+
+    if (write_checkpoint_each_step) {
+      WriteCheckpointFile();
+    }
 
     outfile->Printf("\n");
-    outfile->Printf("  ==> Iteration count <==\n");
-    outfile->Printf("\n");
-    outfile->Printf("      Microiterations:            %12li\n",sdp_->iiter_total());
-    outfile->Printf("      Macroiterations:            %12li\n",sdp_->oiter_total());
-    outfile->Printf("      Orbital optimization steps: %12li\n",orbopt_iter_total_);
-    outfile->Printf("\n");
-    outfile->Printf("  ==> Wall time <==\n");
-    outfile->Printf("\n");
-/*
-// TODO: should libsdp give me timings?
-    outfile->Printf("      Microiterations:            %12.2lf s\n",sdp_->iiter_time());
-    outfile->Printf("      Macroiterations:            %12.2lf s\n",sdp_->oiter_time());
-*/
-    outfile->Printf("      Orbital optimization:       %12.2lf s\n",orbopt_time_);
-    outfile->Printf("      Total:                      %12.2lf s\n",end_total_time - start_total_time);
-    outfile->Printf("\n");
 
-    return energy_primal + enuc_ + efzc_;
+  } while (!orbopt_converged_ || !sdp_->is_converged());
+
+  // free(tmp);
+
+  outfile->Printf("\n");
+  outfile->Printf("      v2RDM iterations converged!\n");
+  outfile->Printf("\n");
+
+  // evaluate spin squared
+  double s2 = 0.0;
+  double *x_p = x->pointer();
+  for (int i = 0; i < amo_; i++) {
+    for (int j = 0; j < amo_; j++) {
+      int h = SymmetryPair(symmetry[i], symmetry[j]);
+      int ij = ibas_ab_sym[h][i][j];
+      int ji = ibas_ab_sym[h][j][i];
+      s2 += x_p[d2aboff[h] + ij * gems_ab[h] + ji];
+    }
+  }
+  double na = nalpha_ - nfrzc_ - nrstc_;
+  double nb = nbeta_ - nfrzc_ - nrstc_;
+  double ms = (multiplicity_ - 1.0) / 2.0;
+
+  // set energy for wavefunction
+  double energy_primal = C_DDOT(n_primal_, c->pointer(), 1, x->pointer(), 1);
+  energy_ = energy_primal + enuc_ + efzc_;
+#ifdef USING_PCMSolver
+  if (PCM_enabled()) {
+    energy_ -= Tr_D_Vpcm_;
+    energy_ += E_pcm_;
+  }
+#endif
+
+  // push final transformation matrix onto Ca_ and Cb_
+  UpdateTransformationMatrix();
+
+  energy_primal = C_DDOT(n_primal_, c->pointer(), 1, x->pointer(), 1);
+
+  // break down energy into one- and two-electron components
+
+  outfile->Printf("      na:                        %20.6lf\n", na);
+  outfile->Printf("      nb:                        %20.6lf\n", nb);
+  outfile->Printf("      v2RDM total spin [S(S+1)]: %20.6lf\n",
+                  0.5 * (na + nb) + ms * ms - s2);
+  outfile->Printf("\n");
+  if (!is_hubbard_ && !is_external_hamiltonian_) {
+    double kinetic, potential, two_electron_energy;
+    EnergyByComponent(kinetic, potential, two_electron_energy);
+
+    outfile->Printf("      Nuclear Repulsion Energy:          %20.12lf\n",
+                    enuc_);
+    outfile->Printf("      Two-Electron Energy:               %20.12lf\n",
+                    two_electron_energy);
+    outfile->Printf("      Kinetic Energy:                    %20.12lf\n",
+                    kinetic);
+    outfile->Printf("      Electron-Nuclear Potential Energy: %20.12lf\n",
+                    potential);
+#ifdef USING_PCMSolver
+    if (PCM_enabled()) {
+      outfile->Printf("      PCM Polarization Energy:           %20.12lf\n",
+                      E_pcm_);
+    }
+#endif
+  } else {
+    double two_electron_energy = 0.0;
+    for (int h = 0; h < nirrep_; h++) {
+      two_electron_energy += C_DDOT(gems_ab[h] * gems_ab[h], x_p + d2aboff[h],
+                                    1, c->pointer() + d2aboff[h], 1);
+      two_electron_energy += C_DDOT(gems_aa[h] * gems_aa[h], x_p + d2aaoff[h],
+                                    1, c->pointer() + d2aaoff[h], 1);
+      two_electron_energy += C_DDOT(gems_aa[h] * gems_aa[h], x_p + d2bboff[h],
+                                    1, c->pointer() + d2bboff[h], 1);
+    }
+    double one_electron_energy = 0.0;
+    for (int h = 0; h < nirrep_; h++) {
+      one_electron_energy += C_DDOT(amopi_[h] * amopi_[h], x_p + d1aoff[h], 1,
+                                    c->pointer() + d1aoff[h], 1);
+      one_electron_energy += C_DDOT(amopi_[h] * amopi_[h], x_p + d1boff[h], 1,
+                                    c->pointer() + d1boff[h], 1);
+    }
+    outfile->Printf("      Two-Electron Energy:               %20.12lf\n",
+                    two_electron_energy);
+    outfile->Printf("      One-Electron Energy:               %20.12lf\n",
+                    one_electron_energy);
+  }
+
+  double total_energy = energy_primal + enuc_ + efzc_;
+#ifdef USING_PCMSolver
+  if (PCM_enabled()) {
+    total_energy -= Tr_D_Vpcm_;
+    total_energy += E_pcm_;
+  }
+#endif
+  outfile->Printf("\n");
+  outfile->Printf("    * v2RDM total energy:                %20.12lf\n",
+                  total_energy);
+  outfile->Printf("\n");
+
+  Process::environment.globals["CURRENT ENERGY"] = total_energy;
+  Process::environment.globals["v2RDM TOTAL ENERGY"] = total_energy;
+
+  if (options_.get_bool("SEMICANONICALIZE_ORBITALS")) {
+    if (options_.get_str("DERTYPE") == "FIRST") {
+      outfile->Printf("\n");
+      outfile->Printf("    <<< WARNING >>> skipping orbital "
+                      "semicanonicalization (blame gradients)\n");
+      outfile->Printf("\n");
+    } else {
+
+      // printf("primal energy before semicanonicalization:
+      // %20.12lf\n",energy_primal+efzc_);
+      orbopt_data_[8] = -2.0;
+      RotateOrbitals();
+
+      // push final transformation matrix onto Ca_ and Cb_
+      UpdateTransformationMatrix();
+    }
+  }
+
+  if (options_.get_bool("WRITE_CHECKPOINT_FILE") && options_.get_str("DERTYPE") != "FIRST") {
+    WriteCheckpointFile();
+    if (options_.get_bool("CHECKPOINT_WRITE_QMO")) {
+      WriteQmoFile();
+    }
+  }
+
+  // compute and natural orbitals and transform 1-RDM/2-RDM to the NO basis
+  if (options_.get_bool("NAT_ORBS") || options_.get_bool("FCIDUMP") ||
+      options_.get_bool("EXTENDED_KOOPMANS")) {
+
+    if (!options_.get_bool("PRINT_RDMS")) { // protect function printing rdms
+                                            // not transformed to no basis
+      ComputeNaturalOrbitals();
+    }
+  }
+  if (options_.get_bool("MOLDEN_WRITE") && !is_hubbard_ &&
+      !is_external_hamiltonian_) {
+    WriteMoldenFile();
+  }
+  if (options_.get_bool("EXTENDED_KOOPMANS") && !is_hubbard_ &&
+      !is_external_hamiltonian_) {
+    ExtendedKoopmans();
+  }
+  if (options_.get_bool("FCIDUMP") && !is_hubbard_ &&
+      !is_external_hamiltonian_) {
+    FCIDUMP();
+  }
+  if (options_.get_bool("PRINT_RDMS")) {
+    print_rdms();
+  }
+
+  // compute and print natural orbital occupation numbers
+  PrintNaturalOrbitalOccupations();
+
+  // push OPDM onto wavefunction object
+  FinalizeOPDM();
+
+  // write tpdm to disk?
+  if (options_.get_bool("TPDM_WRITE")) {
+    WriteActiveTPDM();
+  }
+  if (options_.get_bool("TPDM_WRITE_FULL")) {
+    WriteTPDM();
+    // ReadTPDM();
+  }
+  if (options_.get_bool("TPDM_WRITE_SPIN_FREE")) {
+    WriteTPDMSpinFree();
+    // ReadTPDM();
+  }
+  if (options_.get_bool("OPDM_WRITE_FULL")) {
+    WriteOPDM();
+  }
+  // write 3-particle density matrix to disk?
+  if (options_.get_bool("3PDM_WRITE") && options_.get_bool("CONSTRAIN_D3")) {
+    WriteActive3PDM();
+    // Read3PDM();
+  }
+
+  // for derivatives:
+  if (options_.get_str("DERTYPE") == "FIRST") {
+
+    if (options_.get_bool("NAT_ORBS") || options_.get_bool("FCIDUMP") ||
+        options_.get_bool("EXTENDED_KOOPMANS")) {
+      throw PsiException("analytic gradients require nat_orbs false", __FILE__,
+                         __LINE__);
+    }
+
+    // write checkpoint file for next step in optimization
+    WriteCheckpointFile();
+    if (options_.get_bool("CHECKPOINT_WRITE_QMO")) {
+      WriteQmoFile();
+    }
+
+    // build orbital lagrangian
+    orbopt_data_[8] = -1.0;
+    RotateOrbitals();
+
+    // write 2-RDM in IWL format
+    WriteTPDM_IWL();
+
+    // push orbital lagrangian onto wave function
+    OrbitalLagrangian();
+  }
+
+  // TEST
+  // constrain_gpc_ = true;
+
+  if (constrain_gpc_) {
+    // print errors in generalized pauli constraints:
+    print_gpc_error_ = true;
+    constrain_gpc_ = true;
+    BuildConstraints();
+    std::shared_ptr<Vector> Ax(new Vector(n_dual_));
+    set_gpc_rdm_nrm();
+    for (int my_state = 0; my_state < n_gpc_states_; my_state++) {
+      SortedNaturalOrbitals(my_state);
+      for (int i = 0; i < n_gpc_[my_state]; i++) {
+        x->pointer()[gpcoff[my_state][i]] = 0.0;
+      }
+    }
+    offset = 0;
+    bpsdp_Au(Ax->pointer(), x->pointer());
+    print_gpc_error_ = false;
+  }
+
+  double end_total_time = omp_get_wtime();
+
+  outfile->Printf("\n");
+  outfile->Printf("  ==> Iteration count <==\n");
+  outfile->Printf("\n");
+  outfile->Printf("      Microiterations:            %12li\n",
+                  sdp_->iiter_total());
+  outfile->Printf("      Macroiterations:            %12li\n",
+                  sdp_->oiter_total());
+  outfile->Printf("      Orbital optimization steps: %12li\n",
+                  orbopt_iter_total_);
+  outfile->Printf("\n");
+  outfile->Printf("  ==> Wall time <==\n");
+  outfile->Printf("\n");
+  /*
+  // TODO: should libsdp give me timings?
+      outfile->Printf("      Microiterations:            %12.2lf
+  s\n",sdp_->iiter_time()); outfile->Printf("      Macroiterations: %12.2lf
+  s\n",sdp_->oiter_time());
+  */
+  outfile->Printf("      Orbital optimization:       %12.2lf s\n",
+                  orbopt_time_);
+  outfile->Printf("      Total:                      %12.2lf s\n",
+                  end_total_time - start_total_time);
+  outfile->Printf("\n");
+
+  double final_energy = energy_primal + enuc_ + efzc_;
+#ifdef USING_PCMSolver
+  if (PCM_enabled()) {
+    final_energy -= Tr_D_Vpcm_;
+    final_energy += E_pcm_;
+  }
+#endif
+
+  return final_energy;
 }
 
-void v2RDMSolver::EnergyByComponent(double &kinetic, double &potential, double &two_electron_energy) {
+void v2RDMSolver::EnergyByComponent(double &kinetic, double &potential,
+                                    double &two_electron_energy) {
 
-    double * x_p = x->pointer();
-    double * c_p = c->pointer();
+  double *x_p = x->pointer();
+  double *c_p = c->pointer();
 
-    std::shared_ptr<MintsHelper> mints(new MintsHelper(reference_wavefunction_));
-    std::shared_ptr<Matrix> myT (new Matrix(mints->so_kinetic()));
-    std::shared_ptr<Matrix> myV (new Matrix(mints->so_potential()));
+  std::shared_ptr<MintsHelper> mints(new MintsHelper(reference_wavefunction_));
+  std::shared_ptr<Matrix> myT(new Matrix(mints->so_kinetic()));
+  std::shared_ptr<Matrix> myV(new Matrix(mints->so_potential()));
 
-    myT->transform(Ca_);
-    myV->transform(Ca_);
-    kinetic = 0.0;
-    potential = 0.0;
+  myT->transform(Ca_);
+  myV->transform(Ca_);
+  kinetic = 0.0;
+  potential = 0.0;
 
-    for (int h = 0; h < nirrep_; h++) {
-        for (int i = 0; i < amopi_[h]; i++) {
-            int ii = i + rstcpi_[h] + frzcpi_[h];
-            for (int j = 0; j < amopi_[h]; j++) {
-                int jj = j + rstcpi_[h] + frzcpi_[h];
+  for (int h = 0; h < nirrep_; h++) {
+    for (int i = 0; i < amopi_[h]; i++) {
+      int ii = i + rstcpi_[h] + frzcpi_[h];
+      for (int j = 0; j < amopi_[h]; j++) {
+        int jj = j + rstcpi_[h] + frzcpi_[h];
 
-                if ( ii == jj ) continue;
-                
-                kinetic   += myT->pointer(h)[ii][jj] * x_p[d1aoff[h] + i * amopi_[h] + j];
-                kinetic   += myT->pointer(h)[ii][jj] * x_p[d1boff[h] + i * amopi_[h] + j];
-                
-                potential += myV->pointer(h)[ii][jj] * x_p[d1aoff[h] + i * amopi_[h] + j];
-                potential += myV->pointer(h)[ii][jj] * x_p[d1boff[h] + i * amopi_[h] + j];
-            
-            }
+        if (ii == jj)
+          continue;
 
-            kinetic   += myT->pointer(h)[ii][ii] * x_p[d1aoff[h] + i * amopi_[h] + i];
-            kinetic   += myT->pointer(h)[ii][ii] * x_p[d1boff[h] + i * amopi_[h] + i];
-            
-            potential += myV->pointer(h)[ii][ii] * x_p[d1aoff[h] + i * amopi_[h] + i];
-            potential += myV->pointer(h)[ii][ii] * x_p[d1boff[h] + i * amopi_[h] + i];
-            
-        }
+        kinetic += myT->pointer(h)[ii][jj] * x_p[d1aoff[h] + i * amopi_[h] + j];
+        kinetic += myT->pointer(h)[ii][jj] * x_p[d1boff[h] + i * amopi_[h] + j];
+
+        potential +=
+            myV->pointer(h)[ii][jj] * x_p[d1aoff[h] + i * amopi_[h] + j];
+        potential +=
+            myV->pointer(h)[ii][jj] * x_p[d1boff[h] + i * amopi_[h] + j];
+      }
+
+      kinetic += myT->pointer(h)[ii][ii] * x_p[d1aoff[h] + i * amopi_[h] + i];
+      kinetic += myT->pointer(h)[ii][ii] * x_p[d1boff[h] + i * amopi_[h] + i];
+
+      potential += myV->pointer(h)[ii][ii] * x_p[d1aoff[h] + i * amopi_[h] + i];
+      potential += myV->pointer(h)[ii][ii] * x_p[d1boff[h] + i * amopi_[h] + i];
     }
+  }
 
-    two_electron_energy = efzc_;
-    // remove one-electron parts of frozen core energy
-    for (int h = 0; h < nirrep_; h++) {
-        for (int i = 0; i < rstcpi_[h] + frzcpi_[h]; i++) {
-            two_electron_energy -= 2.0 * myT->pointer(h)[i][i];
-            two_electron_energy -= 2.0 * myV->pointer(h)[i][i];
-        }
+  two_electron_energy = efzc_;
+  // remove one-electron parts of frozen core energy
+  for (int h = 0; h < nirrep_; h++) {
+    for (int i = 0; i < rstcpi_[h] + frzcpi_[h]; i++) {
+      two_electron_energy -= 2.0 * myT->pointer(h)[i][i];
+      two_electron_energy -= 2.0 * myV->pointer(h)[i][i];
     }
-    double active_two_electron_energy = 0.0;
-    for (int h = 0; h < nirrep_; h++) {
-        active_two_electron_energy += C_DDOT(gems_ab[h] * gems_ab[h], x_p + d2aboff[h],1, c->pointer() + d2aboff[h], 1);
-        active_two_electron_energy += C_DDOT(gems_aa[h] * gems_aa[h], x_p + d2aaoff[h],1, c->pointer() + d2aaoff[h], 1);
-        active_two_electron_energy += C_DDOT(gems_aa[h] * gems_aa[h], x_p + d2bboff[h],1, c->pointer() + d2bboff[h], 1);
-    }
-    two_electron_energy += active_two_electron_energy;
+  }
+  double active_two_electron_energy = 0.0;
+  for (int h = 0; h < nirrep_; h++) {
+    active_two_electron_energy +=
+        C_DDOT(gems_ab[h] * gems_ab[h], x_p + d2aboff[h], 1,
+               c->pointer() + d2aboff[h], 1);
+    active_two_electron_energy +=
+        C_DDOT(gems_aa[h] * gems_aa[h], x_p + d2aaoff[h], 1,
+               c->pointer() + d2aaoff[h], 1);
+    active_two_electron_energy +=
+        C_DDOT(gems_aa[h] * gems_aa[h], x_p + d2bboff[h], 1,
+               c->pointer() + d2bboff[h], 1);
+  }
+  two_electron_energy += active_two_electron_energy;
 
-    // core-active part of two-electron energy
-    double core_active = 0.0;
-    for (int h = 0; h < nirrep_; h++) {
-        core_active += C_DDOT(amopi_[h] * amopi_[h], x_p + d1aoff[h],1, c->pointer() + d1aoff[h], 1);
-        core_active += C_DDOT(amopi_[h] * amopi_[h], x_p + d1boff[h],1, c->pointer() + d1boff[h], 1);
-    }
-    core_active -= kinetic;
-    core_active -= potential;
+  // core-active part of two-electron energy
+  double core_active = 0.0;
+  for (int h = 0; h < nirrep_; h++) {
+    core_active += C_DDOT(amopi_[h] * amopi_[h], x_p + d1aoff[h], 1,
+                          c->pointer() + d1aoff[h], 1);
+    core_active += C_DDOT(amopi_[h] * amopi_[h], x_p + d1boff[h], 1,
+                          c->pointer() + d1boff[h], 1);
+  }
+  core_active -= kinetic;
+  core_active -= potential;
 
-    two_electron_energy += core_active;
+  two_electron_energy += core_active;
 
-    // lastly, don't forget core contribution to kinetic and potential energy
-    for (int h = 0; h < nirrep_; h++) {
-        for (int i = 0; i < rstcpi_[h] + frzcpi_[h]; i++) {
-            kinetic   += 2.0 * myT->pointer(h)[i][i];
-            potential += 2.0 * myV->pointer(h)[i][i];
-        }
+  // lastly, don't forget core contribution to kinetic and potential energy
+  for (int h = 0; h < nirrep_; h++) {
+    for (int i = 0; i < rstcpi_[h] + frzcpi_[h]; i++) {
+      kinetic += 2.0 * myT->pointer(h)[i][i];
+      potential += 2.0 * myV->pointer(h)[i][i];
     }
+  }
+#ifdef USING_PCMSolver
+  if (PCM_enabled()) {
+    two_electron_energy -= Tr_D_Vpcm_;
+  }
+#endif
 }
-
 
 void v2RDMSolver::WriteMoldenFile() {
 
-    // it is possible the 1-RDM is already in the NO basis:
-    // Additionally NAT_ORBS True does the spin molden file
-    if ( options_.get_bool("NAT_ORBS") || options_.get_bool("FCIDUMP") || options_.get_bool("EXTENDED_KOOPMANS") ) {
+#ifdef USING_PCMSolver
+  FinalizeOPDM();
 
-        std::shared_ptr<Matrix> Da (new Matrix(nirrep_,nmopi_,nmopi_));
-        std::shared_ptr<Matrix> eigveca (new Matrix(nirrep_,nmopi_,nmopi_));
-        std::shared_ptr<Vector> eigvala = std::make_shared<Vector>("Natural Orbital Occupation Numbers (spin free)",nmopi_);
-        std::shared_ptr<Matrix> Db (new Matrix(nirrep_,nmopi_,nmopi_));
-        std::shared_ptr<Matrix> eigvecb (new Matrix(nirrep_,nmopi_,nmopi_));
-        std::shared_ptr<Vector> eigvalb = std::make_shared<Vector>("Natural Orbital Occupation Numbers (spin free)",nmopi_);
-        for (int h = 0; h < nirrep_; h++) {
-            for (int i = 0; i < frzcpi_[h] + rstcpi_[h]; i++) {
-                Da->pointer(h)[i][i] = 1.0;
-                Db->pointer(h)[i][i] = 1.0;
-            }
-            for (int i = rstcpi_[h] + frzcpi_[h]; i < nmopi_[h] - rstvpi_[h] - frzvpi_[h]; i++) {
-                for (int j = rstcpi_[h] + frzcpi_[h]; j < nmopi_[h]-rstvpi_[h]-frzvpi_[h]; j++) {
-                   Da->pointer(h)[i][j]  = x->pointer()[d1aoff[h]+(i-rstcpi_[h]-frzcpi_[h])*amopi_[h]+(j-rstcpi_[h]-frzcpi_[h])];
-                   Db->pointer(h)[i][j]  = x->pointer()[d1boff[h]+(i-rstcpi_[h]-frzcpi_[h])*amopi_[h]+(j-rstcpi_[h]-frzcpi_[h])];
-                }
-            }
+  std::string filename = options_.get_str("MOLDEN_FILE");
+  if (filename.empty()) {
+    filename = get_writer_file_prefix(reference_wavefunction_->molecule()->name()) +
+               ".molden";
+  }
+
+  try {
+    py::gil_scoped_acquire gil;
+    py::module_::import("psi4.driver.p4util.writer");
+    std::shared_ptr<Wavefunction> wfn = shared_from_this();
+    py::object py_wfn = py::cast(wfn);
+    py_wfn.attr("write_molden")(filename, true, true);
+  } catch (const py::error_already_set& ex) {
+    throw PsiException("Failed to write v2RDM-CASSCF Molden file: " +
+                           std::string(ex.what()),
+                       __FILE__, __LINE__);
+  }
+
+  outfile->Printf("    Wrote v2RDM-CASSCF Molden file: %s\n",
+                  filename.c_str());
+  return;
+#endif
+
+  // it is possible the 1-RDM is already in the NO basis:
+  // Additionally NAT_ORBS True does the spin molden file
+  if (options_.get_bool("NAT_ORBS") || options_.get_bool("FCIDUMP") ||
+      options_.get_bool("EXTENDED_KOOPMANS")) {
+
+    std::shared_ptr<Matrix> Da(new Matrix(nirrep_, nmopi_, nmopi_));
+    std::shared_ptr<Matrix> eigveca(new Matrix(nirrep_, nmopi_, nmopi_));
+    std::shared_ptr<Vector> eigvala = std::make_shared<Vector>(
+        "Natural Orbital Occupation Numbers (spin free)", nmopi_);
+    std::shared_ptr<Matrix> Db(new Matrix(nirrep_, nmopi_, nmopi_));
+    std::shared_ptr<Matrix> eigvecb(new Matrix(nirrep_, nmopi_, nmopi_));
+    std::shared_ptr<Vector> eigvalb = std::make_shared<Vector>(
+        "Natural Orbital Occupation Numbers (spin free)", nmopi_);
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < frzcpi_[h] + rstcpi_[h]; i++) {
+        Da->pointer(h)[i][i] = 1.0;
+        Db->pointer(h)[i][i] = 1.0;
+      }
+      for (int i = rstcpi_[h] + frzcpi_[h];
+           i < nmopi_[h] - rstvpi_[h] - frzvpi_[h]; i++) {
+        for (int j = rstcpi_[h] + frzcpi_[h];
+             j < nmopi_[h] - rstvpi_[h] - frzvpi_[h]; j++) {
+          Da->pointer(h)[i][j] =
+              x->pointer()[d1aoff[h] +
+                           (i - rstcpi_[h] - frzcpi_[h]) * amopi_[h] +
+                           (j - rstcpi_[h] - frzcpi_[h])];
+          Db->pointer(h)[i][j] =
+              x->pointer()[d1boff[h] +
+                           (i - rstcpi_[h] - frzcpi_[h]) * amopi_[h] +
+                           (j - rstcpi_[h] - frzcpi_[h])];
         }
-        Da->diagonalize(eigveca,eigvala,descending);
-        Db->diagonalize(eigvecb,eigvalb,descending);
-	eigveca->print();
-	eigvecb->print();
+      }
+    }
+    Da->diagonalize(eigveca, eigvala, descending);
+    Db->diagonalize(eigvecb, eigvalb, descending);
+    eigveca->print();
+    eigvecb->print();
 
-        std::shared_ptr<Matrix> Cno_a (new Matrix(Ca_));
-        std::shared_ptr<Matrix> Cno_b (new Matrix(Ca_));
+    std::shared_ptr<Matrix> Cno_a(new Matrix(Ca_));
+    std::shared_ptr<Matrix> Cno_b(new Matrix(Ca_));
 
-
-        for (int h = 0; h < nirrep_; h++) {
-            for (int mu = 0; mu < nsopi_[h]; mu++) {
-                double *  temp = (double*)malloc(nmopi_[h]*sizeof(double));
-                double ** cp   = Cno_a->pointer(h);
-                double ** ep   = eigveca->pointer(h);
-                for (int i = 0; i < nmopi_[h]; i++) {
-                    double dum = 0.0;
-                    for (int j = 0; j < nmopi_[h]; j++) {
-                        dum += cp[mu][j] * ep[j][i];
-                    }
-                    temp[i] = dum;
-                }
-                for (int i = 0; i < nmopi_[h]; i++) {
-                    cp[mu][i] = temp[i];
-                }
-                free(temp);
-            }
+    for (int h = 0; h < nirrep_; h++) {
+      for (int mu = 0; mu < nsopi_[h]; mu++) {
+        double *temp = (double *)malloc(nmopi_[h] * sizeof(double));
+        double **cp = Cno_a->pointer(h);
+        double **ep = eigveca->pointer(h);
+        for (int i = 0; i < nmopi_[h]; i++) {
+          double dum = 0.0;
+          for (int j = 0; j < nmopi_[h]; j++) {
+            dum += cp[mu][j] * ep[j][i];
+          }
+          temp[i] = dum;
         }
-
-        for (int h = 0; h < nirrep_; h++) {
-            for (int mu = 0; mu < nsopi_[h]; mu++) {
-                double *  temp = (double*)malloc(nmopi_[h]*sizeof(double));
-                double ** cp   = Cno_b->pointer(h);
-                double ** ep   = eigvecb->pointer(h);
-                for (int i = 0; i < nmopi_[h]; i++) {
-                    double dum = 0.0;
-                    for (int j = 0; j < nmopi_[h]; j++) {
-                        dum += cp[mu][j] * ep[j][i];
-                    }
-                    temp[i] = dum;
-                }
-                for (int i = 0; i < nmopi_[h]; i++) {
-                    cp[mu][i] = temp[i];
-                }
-                free(temp);
-            }
+        for (int i = 0; i < nmopi_[h]; i++) {
+          cp[mu][i] = temp[i];
         }
-
-        // Print a molden file
-        if ( options_["RESTART_FROM_CHECKPOINT_FILE"].has_changed() ) {
-            throw PsiException("printing orbitals is currently disabled when restarting v2rdm jobs.  i can't remember why, though... sorry!",__FILE__,__LINE__);
-        }
-        //std::shared_ptr<MoldenWriter> molden(new MoldenWriter((std::shared_ptr<Wavefunction>)this));
-        std::shared_ptr<MoldenWriter> molden(new MoldenWriter(reference_wavefunction_));
-        std::shared_ptr<Vector> zero = std::make_shared<Vector>(nmopi_);
-        zero->zero();
-        std::string filename = get_writer_file_prefix(reference_wavefunction_->molecule()->name()) + ".molden";
-        molden->write(filename,Cno_a,Cno_b,zero, zero,eigvala,eigvalb,true);
-
-    // otherwise, we need to compute the natural orbitals:
-    } else {
-        std::shared_ptr<Matrix> D (new Matrix(nirrep_,nmopi_,nmopi_));
-        std::shared_ptr<Matrix> eigvec (new Matrix(nirrep_,nmopi_,nmopi_));
-        std::shared_ptr<Vector> eigval = std::make_shared<Vector>("Natural Orbital Occupation Numbers (spin free)",nmopi_);
-        for (int h = 0; h < nirrep_; h++) {
-            for (int i = 0; i < frzcpi_[h] + rstcpi_[h]; i++) {
-                D->pointer(h)[i][i] = 1.0;
-            }
-            for (int i = rstcpi_[h] + frzcpi_[h]; i < nmopi_[h] - rstvpi_[h] - frzvpi_[h]; i++) {
-                for (int j = rstcpi_[h] + frzcpi_[h]; j < nmopi_[h]-rstvpi_[h]-frzvpi_[h]; j++) {
-                   D->pointer(h)[i][j]  = 0.5 * x->pointer()[d1aoff[h]+(i-rstcpi_[h]-frzcpi_[h])*amopi_[h]+(j-rstcpi_[h]-frzcpi_[h])];
-                   D->pointer(h)[i][j] += 0.5 * x->pointer()[d1boff[h]+(i-rstcpi_[h]-frzcpi_[h])*amopi_[h]+(j-rstcpi_[h]-frzcpi_[h])];
-                }
-            }
-        }
-        std::shared_ptr<Matrix> saved ( new Matrix(D) );
-        D->diagonalize(eigvec,eigval,descending);
-
-        std::shared_ptr<Matrix> Cno (new Matrix(Ca_));
-
-        //Ca_->print();
-        // build AO/NO transformation matrix 
-        for (int h = 0; h < nirrep_; h++) {
-            for (int mu = 0; mu < nsopi_[h]; mu++) {
-                double *  temp = (double*)malloc(nmopi_[h]*sizeof(double));
-                double ** cp   = Cno->pointer(h);
-                double ** ep   = eigvec->pointer(h);
-                for (int i = 0; i < nmopi_[h]; i++) {
-                    double dum = 0.0;
-                    for (int j = 0; j < nmopi_[h]; j++) {
-                        dum += cp[mu][j] * ep[j][i];
-                    }
-                    temp[i] = dum;
-                }
-                for (int i = 0; i < nmopi_[h]; i++) {
-                    cp[mu][i] = temp[i];
-                }
-                free(temp);
-            }
-        }
-	//    // build AO/NO transformation matrix (both Ca_ and Cb_)
-	//for (int h = 0; h < nirrep_; h++) {
-	//    for (int mu = 0; mu < nsopi_[h]; mu++) {
-	//        double *  temp = (double*)malloc(nmopi_[h]*sizeof(double));
-	//        double ** ep   = eigvec->pointer(h);
-	//        double ** cp = Ca_->pointer(h);
-	//        for (int i = rstcpi_[h] + frzcpi_[h]; i < nmopi_[h]-rstvpi_[h]-frzvpi_[h]; i++) {
-	//            double dum = 0.0;
-	//            for (int j = rstcpi_[h] + frzcpi_[h]; j < nmopi_[h]-rstvpi_[h]-frzvpi_[h]; j++) {
-	//                dum += cp[mu][j] * ep[j-rstcpi_[h]-frzcpi_[h]][i-rstcpi_[h]-frzcpi_[h]];
-	//            }
-	//            temp[i] = dum;
-	//        }
-	//        for (int i = rstcpi_[h] + frzcpi_[h]; i < nmopi_[h]-rstvpi_[h]-frzvpi_[h]; i++) {
-	//            cp[mu][i] = temp[i];
-	//        }
-	//        free(temp);
-	//    }
-	//}
-
-	Cno->print();
-	eigvec->print();
-	eigval->print();
-
-        // Print a molden file
-        if ( options_["RESTART_FROM_CHECKPOINT_FILE"].has_changed() ) {
-            throw PsiException("printing orbitals is currently disabled when restarting v2rdm jobs.  i can't remember why, though... sorry!",__FILE__,__LINE__);
-        }
-        //std::shared_ptr<MoldenWriter> molden(new MoldenWriter((std::shared_ptr<Wavefunction>)this));
-        std::shared_ptr<MoldenWriter> molden(new MoldenWriter(reference_wavefunction_));
-        std::shared_ptr<Vector> zero = std::make_shared<Vector>(nmopi_);
-        zero->zero();
-        std::string filename = get_writer_file_prefix(reference_wavefunction_->molecule()->name()) + ".molden";
-        molden->write(filename,Cno,Cno,zero, zero,eigval,eigval,true);
+        free(temp);
+      }
     }
 
+    for (int h = 0; h < nirrep_; h++) {
+      for (int mu = 0; mu < nsopi_[h]; mu++) {
+        double *temp = (double *)malloc(nmopi_[h] * sizeof(double));
+        double **cp = Cno_b->pointer(h);
+        double **ep = eigvecb->pointer(h);
+        for (int i = 0; i < nmopi_[h]; i++) {
+          double dum = 0.0;
+          for (int j = 0; j < nmopi_[h]; j++) {
+            dum += cp[mu][j] * ep[j][i];
+          }
+          temp[i] = dum;
+        }
+        for (int i = 0; i < nmopi_[h]; i++) {
+          cp[mu][i] = temp[i];
+        }
+        free(temp);
+      }
+    }
+
+    // Print a molden file
+    if (options_["RESTART_FROM_CHECKPOINT_FILE"].has_changed()) {
+      throw PsiException(
+          "printing orbitals is currently disabled when restarting v2rdm jobs. "
+          " i can't remember why, though... sorry!",
+          __FILE__, __LINE__);
+    }
+    outfile->Printf(
+        "Warning: Writing molden file from C++ is not supported with Psi4 "
+        "v1.10. Use Python's psi4.driver.molden function instead.\n");
+    /*
+    //std::shared_ptr<MoldenWriter> molden(new
+    MoldenWriter((std::shared_ptr<Wavefunction>)this));
+    std::shared_ptr<MoldenWriter> molden(new
+    MoldenWriter(reference_wavefunction_)); std::shared_ptr<Vector> zero =
+    std::make_shared<Vector>(nmopi_); zero->zero(); std::string filename =
+    get_writer_file_prefix(reference_wavefunction_->molecule()->name()) +
+    ".molden"; molden->write(filename,Cno_a,Cno_b,zero,
+    zero,eigvala,eigvalb,true);
+    */
+
+    // otherwise, we need to compute the natural orbitals:
+  } else {
+    std::shared_ptr<Matrix> D(new Matrix(nirrep_, nmopi_, nmopi_));
+    std::shared_ptr<Matrix> eigvec(new Matrix(nirrep_, nmopi_, nmopi_));
+    std::shared_ptr<Vector> eigval = std::make_shared<Vector>(
+        "Natural Orbital Occupation Numbers (spin free)", nmopi_);
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < frzcpi_[h] + rstcpi_[h]; i++) {
+        D->pointer(h)[i][i] = 1.0;
+      }
+      for (int i = rstcpi_[h] + frzcpi_[h];
+           i < nmopi_[h] - rstvpi_[h] - frzvpi_[h]; i++) {
+        for (int j = rstcpi_[h] + frzcpi_[h];
+             j < nmopi_[h] - rstvpi_[h] - frzvpi_[h]; j++) {
+          D->pointer(h)[i][j] =
+              0.5 * x->pointer()[d1aoff[h] +
+                                 (i - rstcpi_[h] - frzcpi_[h]) * amopi_[h] +
+                                 (j - rstcpi_[h] - frzcpi_[h])];
+          D->pointer(h)[i][j] +=
+              0.5 * x->pointer()[d1boff[h] +
+                                 (i - rstcpi_[h] - frzcpi_[h]) * amopi_[h] +
+                                 (j - rstcpi_[h] - frzcpi_[h])];
+        }
+      }
+    }
+    std::shared_ptr<Matrix> saved(new Matrix(D));
+    D->diagonalize(eigvec, eigval, descending);
+
+    std::shared_ptr<Matrix> Cno(new Matrix(Ca_));
+
+    // Ca_->print();
+    //  build AO/NO transformation matrix
+    for (int h = 0; h < nirrep_; h++) {
+      for (int mu = 0; mu < nsopi_[h]; mu++) {
+        double *temp = (double *)malloc(nmopi_[h] * sizeof(double));
+        double **cp = Cno->pointer(h);
+        double **ep = eigvec->pointer(h);
+        for (int i = 0; i < nmopi_[h]; i++) {
+          double dum = 0.0;
+          for (int j = 0; j < nmopi_[h]; j++) {
+            dum += cp[mu][j] * ep[j][i];
+          }
+          temp[i] = dum;
+        }
+        for (int i = 0; i < nmopi_[h]; i++) {
+          cp[mu][i] = temp[i];
+        }
+        free(temp);
+      }
+    }
+    //    // build AO/NO transformation matrix (both Ca_ and Cb_)
+    // for (int h = 0; h < nirrep_; h++) {
+    //    for (int mu = 0; mu < nsopi_[h]; mu++) {
+    //        double *  temp = (double*)malloc(nmopi_[h]*sizeof(double));
+    //        double ** ep   = eigvec->pointer(h);
+    //        double ** cp = Ca_->pointer(h);
+    //        for (int i = rstcpi_[h] + frzcpi_[h]; i <
+    //        nmopi_[h]-rstvpi_[h]-frzvpi_[h]; i++) {
+    //            double dum = 0.0;
+    //            for (int j = rstcpi_[h] + frzcpi_[h]; j <
+    //            nmopi_[h]-rstvpi_[h]-frzvpi_[h]; j++) {
+    //                dum += cp[mu][j] *
+    //                ep[j-rstcpi_[h]-frzcpi_[h]][i-rstcpi_[h]-frzcpi_[h]];
+    //            }
+    //            temp[i] = dum;
+    //        }
+    //        for (int i = rstcpi_[h] + frzcpi_[h]; i <
+    //        nmopi_[h]-rstvpi_[h]-frzvpi_[h]; i++) {
+    //            cp[mu][i] = temp[i];
+    //        }
+    //        free(temp);
+    //    }
+    //}
+
+    Cno->print();
+    eigvec->print();
+    eigval->print();
+
+    // Print a molden file
+    if (options_["RESTART_FROM_CHECKPOINT_FILE"].has_changed()) {
+      throw PsiException(
+          "printing orbitals is currently disabled when restarting v2rdm jobs. "
+          " i can't remember why, though... sorry!",
+          __FILE__, __LINE__);
+    }
+    outfile->Printf(
+        "Warning: Writing molden file from C++ is not supported with Psi4 "
+        "v1.10. Use Python's psi4.driver.molden function instead.\n");
+    /*
+    //std::shared_ptr<MoldenWriter> molden(new
+    MoldenWriter((std::shared_ptr<Wavefunction>)this));
+    std::shared_ptr<MoldenWriter> molden(new
+    MoldenWriter(reference_wavefunction_)); std::shared_ptr<Vector> zero =
+    std::make_shared<Vector>(nmopi_); zero->zero(); std::string filename =
+    get_writer_file_prefix(reference_wavefunction_->molecule()->name()) +
+    ".molden"; molden->write(filename,Cno,Cno,zero, zero,eigval,eigval,true);
+    */
+  }
 }
 
 void v2RDMSolver::FinalizeOPDM() {
-    // nee
+  // nee
 
-    std::stringstream ss;
-    ss << "v-2RDM";
-    std::stringstream ss_a;
-    std::stringstream ss_b;
-    ss_a << ss.str() << " alpha";
-    ss_b << ss.str() << " beta";
-    SharedMatrix opdm_a(new Matrix(ss_a.str(), Ca_->colspi(), Ca_->colspi()));
-    SharedMatrix opdm_b(new Matrix(ss_b.str(), Ca_->colspi(), Ca_->colspi()));
+  std::stringstream ss;
+  ss << "v-2RDM";
+  std::stringstream ss_a;
+  std::stringstream ss_b;
+  ss_a << ss.str() << " alpha";
+  ss_b << ss.str() << " beta";
+  SharedMatrix opdm_a(new Matrix(ss_a.str(), Ca_->colspi(), Ca_->colspi()));
+  SharedMatrix opdm_b(new Matrix(ss_b.str(), Ca_->colspi(), Ca_->colspi()));
 
-    for (int h = 0; h < nirrep_; h++) {
-        for (int i = 0; i < rstcpi_[h]+frzcpi_[h]; i++) {
-            opdm_a->pointer(h)[i][i] = 1.0;
-        }
-        for (int i = rstcpi_[h]+frzcpi_[h]; i < nmopi_[h]-rstvpi_[h]-frzvpi_[h]; i++) {
-            for (int j = rstcpi_[h]+frzcpi_[h]; j < nmopi_[h]-rstvpi_[h]-frzvpi_[h]; j++) {
-                opdm_a->pointer(h)[i][j] = x->pointer()[d1aoff[h]+(i-rstcpi_[h]-frzcpi_[h])*amopi_[h]+(j-rstcpi_[h]-frzcpi_[h])];
-            }
-        }
+  for (int h = 0; h < nirrep_; h++) {
+    for (int i = 0; i < rstcpi_[h] + frzcpi_[h]; i++) {
+      opdm_a->pointer(h)[i][i] = 1.0;
     }
-
-    int symm = opdm_a->symmetry();
-
-    double* temp = (double*)malloc(Ca_->max_ncol() * Ca_->max_nrow() * sizeof(double));
-
-    Da_->zero();
-    for (int h = 0; h < nirrep_; h++) {
-        int nmol = Ca_->colspi()[h];
-        int nmor = Ca_->colspi()[h^symm];
-        int nsol = Ca_->rowspi()[h];
-        int nsor = Ca_->rowspi()[h^symm];
-        if (!nmol || !nmor || !nsol || !nsor) continue;
-        double** Clp = Ca_->pointer(h);
-        double** Crp = Ca_->pointer(h^symm);
-        double** Dmop = opdm_a->pointer(h^symm);
-        double** Dsop = Da_->pointer(h^symm);
-        C_DGEMM('N','T',nmol,nsor,nmor,1.0,Dmop[0],nmor,Crp[0],nmor,0.0,temp,nsor);
-        C_DGEMM('N','N',nsol,nsor,nmol,1.0,Clp[0],nmol,temp,nsor,0.0,Dsop[0],nsor);
+    for (int i = rstcpi_[h] + frzcpi_[h];
+         i < nmopi_[h] - rstvpi_[h] - frzvpi_[h]; i++) {
+      for (int j = rstcpi_[h] + frzcpi_[h];
+           j < nmopi_[h] - rstvpi_[h] - frzvpi_[h]; j++) {
+        opdm_a->pointer(h)[i][j] =
+            x->pointer()[d1aoff[h] + (i - rstcpi_[h] - frzcpi_[h]) * amopi_[h] +
+                         (j - rstcpi_[h] - frzcpi_[h])];
+      }
     }
+  }
 
-    for (int h = 0; h < nirrep_; h++) {
-        for (int i = 0; i < rstcpi_[h]+frzcpi_[h]; i++) {
-            opdm_b->pointer(h)[i][i] = 1.0;
-        }
-        for (int i = rstcpi_[h]+frzcpi_[h]; i < nmopi_[h]-rstvpi_[h]-frzvpi_[h]; i++) {
-            for (int j = rstcpi_[h]+frzcpi_[h]; j < nmopi_[h]-rstvpi_[h]-frzvpi_[h]; j++) {
-                opdm_b->pointer(h)[i][j] = x->pointer()[d1boff[h]+(i-rstcpi_[h]-frzcpi_[h])*amopi_[h]+(j-rstcpi_[h]-frzcpi_[h])];
-            }
-        }
-    }
-    Db_->zero();
-    // hmm... the IntegralTransform type is Restricted, so only use Ca_ here.
-    for (int h = 0; h < nirrep_; h++) {
-        int nmol = Ca_->colspi()[h];
-        int nmor = Ca_->colspi()[h^symm];
-        int nsol = Ca_->rowspi()[h];
-        int nsor = Ca_->rowspi()[h^symm];
-        if (!nmol || !nmor || !nsol || !nsor) continue;
-        double** Clp = Ca_->pointer(h);
-        double** Crp = Ca_->pointer(h^symm);
-        double** Dmop = opdm_b->pointer(h^symm);
-        double** Dsop = Db_->pointer(h^symm);
-        C_DGEMM('N','T',nmol,nsor,nmor,1.0,Dmop[0],nmor,Crp[0],nmor,0.0,temp,nsor);
-        C_DGEMM('N','N',nsol,nsor,nmol,1.0,Clp[0],nmol,temp,nsor,0.0,Dsop[0],nsor);
-    }
+  int symm = opdm_a->symmetry();
 
-    free(temp);
+  double *temp =
+      (double *)malloc(Ca_->max_ncol() * Ca_->max_nrow() * sizeof(double));
+
+  Da_->zero();
+  for (int h = 0; h < nirrep_; h++) {
+    int nmol = Ca_->colspi()[h];
+    int nmor = Ca_->colspi()[h ^ symm];
+    int nsol = Ca_->rowspi()[h];
+    int nsor = Ca_->rowspi()[h ^ symm];
+    if (!nmol || !nmor || !nsol || !nsor)
+      continue;
+    double **Clp = Ca_->pointer(h);
+    double **Crp = Ca_->pointer(h ^ symm);
+    double **Dmop = opdm_a->pointer(h ^ symm);
+    double **Dsop = Da_->pointer(h ^ symm);
+    C_DGEMM('N', 'T', nmol, nsor, nmor, 1.0, Dmop[0], nmor, Crp[0], nmor, 0.0,
+            temp, nsor);
+    C_DGEMM('N', 'N', nsol, nsor, nmol, 1.0, Clp[0], nmol, temp, nsor, 0.0,
+            Dsop[0], nsor);
+  }
+
+  for (int h = 0; h < nirrep_; h++) {
+    for (int i = 0; i < rstcpi_[h] + frzcpi_[h]; i++) {
+      opdm_b->pointer(h)[i][i] = 1.0;
+    }
+    for (int i = rstcpi_[h] + frzcpi_[h];
+         i < nmopi_[h] - rstvpi_[h] - frzvpi_[h]; i++) {
+      for (int j = rstcpi_[h] + frzcpi_[h];
+           j < nmopi_[h] - rstvpi_[h] - frzvpi_[h]; j++) {
+        opdm_b->pointer(h)[i][j] =
+            x->pointer()[d1boff[h] + (i - rstcpi_[h] - frzcpi_[h]) * amopi_[h] +
+                         (j - rstcpi_[h] - frzcpi_[h])];
+      }
+    }
+  }
+  Db_->zero();
+  // hmm... the IntegralTransform type is Restricted, so only use Ca_ here.
+  for (int h = 0; h < nirrep_; h++) {
+    int nmol = Ca_->colspi()[h];
+    int nmor = Ca_->colspi()[h ^ symm];
+    int nsol = Ca_->rowspi()[h];
+    int nsor = Ca_->rowspi()[h ^ symm];
+    if (!nmol || !nmor || !nsol || !nsor)
+      continue;
+    double **Clp = Ca_->pointer(h);
+    double **Crp = Ca_->pointer(h ^ symm);
+    double **Dmop = opdm_b->pointer(h ^ symm);
+    double **Dsop = Db_->pointer(h ^ symm);
+    C_DGEMM('N', 'T', nmol, nsor, nmor, 1.0, Dmop[0], nmor, Crp[0], nmor, 0.0,
+            temp, nsor);
+    C_DGEMM('N', 'N', nsol, nsor, nmol, 1.0, Clp[0], nmol, temp, nsor, 0.0,
+            Dsop[0], nsor);
+  }
+
+  free(temp);
 }
 
-void v2RDMSolver::Guess(){
+void v2RDMSolver::Guess() {
 
-    double* x_p = x->pointer();
-    memset((void*)x_p,'\0',n_primal_*sizeof(double));
+  double *x_p = x->pointer();
+  memset((void *)x_p, '\0', n_primal_ * sizeof(double));
 
-    if ( options_.get_str("TPDM_GUESS") == "HF" ) {
+  if (options_.get_str("TPDM_GUESS") == "HF") {
 
-        // Hartree-Fock guess for D2, D1, Q1, Q2, and G2
+    // Hartree-Fock guess for D2, D1, Q1, Q2, and G2
 
-        // D2ab
-        int poff1 = 0;
-        for (int h1 = 0; h1 < nirrep_; h1++) {
-            for (int i = 0; i < soccpi_[h1] + doccpi_[h1] - rstcpi_[h1] - frzcpi_[h1]; i++){
-                int poff2 = 0;
-                for (int h2 = 0; h2 < nirrep_; h2++) {
-                    for (int j = 0; j < doccpi_[h2] - rstcpi_[h2] - frzcpi_[h2]; j++){
-                        int ii = i + poff1;
-                        int jj = j + poff2;
-                        int h3 = SymmetryPair(symmetry[ii],symmetry[jj]);
-                        int ij = ibas_ab_sym[h3][ii][jj];
-                        x_p[d2aboff[h3] + ij*gems_ab[h3]+ij] = 1.0;
-                    }
-                    poff2   += nmopi_[h2] - rstcpi_[h2] - frzcpi_[h2] - rstvpi_[h2] - frzvpi_[h2];
-                }
-            }
-            poff1   += nmopi_[h1] - rstcpi_[h1] - frzcpi_[h1] - rstvpi_[h1] - frzvpi_[h1];
+    // D2ab
+    int poff1 = 0;
+    for (int h1 = 0; h1 < nirrep_; h1++) {
+      for (int i = 0; i < soccpi_[h1] + doccpi_[h1] - rstcpi_[h1] - frzcpi_[h1];
+           i++) {
+        int poff2 = 0;
+        for (int h2 = 0; h2 < nirrep_; h2++) {
+          for (int j = 0; j < doccpi_[h2] - rstcpi_[h2] - frzcpi_[h2]; j++) {
+            int ii = i + poff1;
+            int jj = j + poff2;
+            int h3 = SymmetryPair(symmetry[ii], symmetry[jj]);
+            int ij = ibas_ab_sym[h3][ii][jj];
+            x_p[d2aboff[h3] + ij * gems_ab[h3] + ij] = 1.0;
+          }
+          poff2 += nmopi_[h2] - rstcpi_[h2] - frzcpi_[h2] - rstvpi_[h2] -
+                   frzvpi_[h2];
         }
-
-        // d2aa
-        poff1 = 0;
-        for (int h1 = 0; h1 < nirrep_; h1++) {
-            for (int i = 0; i < soccpi_[h1] + doccpi_[h1] - rstcpi_[h1] - frzcpi_[h1]; i++){
-                int poff2 = 0;
-                for (int h2 = 0; h2 < nirrep_; h2++) {
-                    for (int j = 0; j < soccpi_[h2] + doccpi_[h2] - rstcpi_[h2] - frzcpi_[h2]; j++){
-                        int ii = i + poff1;
-                        int jj = j + poff2;
-                        if ( jj >= ii ) continue;
-                        int h3 = SymmetryPair(symmetry[ii],symmetry[jj]);
-                        int ij = ibas_aa_sym[h3][ii][jj];
-                        x_p[d2aaoff[h3] + ij*gems_aa[h3]+ij] = 1.0;
-                    }
-                    poff2   += nmopi_[h2] - rstcpi_[h2] - frzcpi_[h2] - rstvpi_[h2] - frzvpi_[h2];
-                }
-            }
-            poff1   += nmopi_[h1] - rstcpi_[h1] - frzcpi_[h1] - rstvpi_[h1] - frzvpi_[h1];
-        }
-
-        // d2bb
-        poff1 = 0;
-        for (int h1 = 0; h1 < nirrep_; h1++) {
-            for (int i = 0; i < doccpi_[h1] - rstcpi_[h1] - frzcpi_[h1]; i++){
-                int poff2 = 0;
-                for (int h2 = 0; h2 < nirrep_; h2++) {
-                    for (int j = 0; j < doccpi_[h2] - rstcpi_[h2] - frzcpi_[h2]; j++){
-                        int ii = i + poff1;
-                        int jj = j + poff2;
-                        if ( jj >= ii ) continue;
-                        int h3 = SymmetryPair(symmetry[ii],symmetry[jj]);
-                        int ij = ibas_aa_sym[h3][ii][jj];
-                        x_p[d2bboff[h3] + ij*gems_aa[h3]+ij] = 1.0;
-                    }
-                    poff2   += nmopi_[h2] - rstcpi_[h2] - frzcpi_[h2] - rstvpi_[h2] - frzvpi_[h2];
-                }
-            }
-            poff1   += nmopi_[h1] - rstcpi_[h1] - frzcpi_[h1] - rstvpi_[h1] - frzvpi_[h1];
-        }
-
-        // D1
-        for (int h = 0; h < nirrep_; h++) {
-            for (int i = rstcpi_[h] + frzcpi_[h]; i < doccpi_[h]+soccpi_[h]; i++) {
-                int ii = i - rstcpi_[h] - frzcpi_[h];
-                x_p[d1aoff[h]+ii*amopi_[h]+ii] = 1.0;
-            }
-            for (int i = rstcpi_[h] + frzcpi_[h]; i < doccpi_[h]; i++) {
-                int ii = i - rstcpi_[h] - frzcpi_[h];
-                x_p[d1boff[h]+ii*amopi_[h]+ii] = 1.0;
-            }
-            // Q1
-            for (int i = doccpi_[h]+soccpi_[h]; i < nmopi_[h]-rstvpi_[h]-frzvpi_[h]; i++) {
-                int ii = i - rstcpi_[h] - frzcpi_[h];
-                x_p[q1aoff[h]+ii*amopi_[h]+ii] = 1.0;
-            }
-            for (int i = doccpi_[h]; i < nmopi_[h]-rstvpi_[h] - frzvpi_[h]; i++) {
-                int ii = i - rstcpi_[h] - frzcpi_[h];
-                x_p[q1boff[h]+ii*amopi_[h]+ii] = 1.0;
-            }
-        }
-    }else { // random guess
-
-        srand(0);
-        for (int i = 0; i < n_primal_; i++) {
-            x_p[i] = ( (double)rand()/RAND_MAX - 1.0 ) * 2.0;
-        }
-        return;
-
+      }
+      poff1 +=
+          nmopi_[h1] - rstcpi_[h1] - frzcpi_[h1] - rstvpi_[h1] - frzvpi_[h1];
     }
 
-    if ( constrain_q2_ ) {
-        Q2_constraints_guess(x_p);
+    // d2aa
+    poff1 = 0;
+    for (int h1 = 0; h1 < nirrep_; h1++) {
+      for (int i = 0; i < soccpi_[h1] + doccpi_[h1] - rstcpi_[h1] - frzcpi_[h1];
+           i++) {
+        int poff2 = 0;
+        for (int h2 = 0; h2 < nirrep_; h2++) {
+          for (int j = 0;
+               j < soccpi_[h2] + doccpi_[h2] - rstcpi_[h2] - frzcpi_[h2]; j++) {
+            int ii = i + poff1;
+            int jj = j + poff2;
+            if (jj >= ii)
+              continue;
+            int h3 = SymmetryPair(symmetry[ii], symmetry[jj]);
+            int ij = ibas_aa_sym[h3][ii][jj];
+            x_p[d2aaoff[h3] + ij * gems_aa[h3] + ij] = 1.0;
+          }
+          poff2 += nmopi_[h2] - rstcpi_[h2] - frzcpi_[h2] - rstvpi_[h2] -
+                   frzvpi_[h2];
+        }
+      }
+      poff1 +=
+          nmopi_[h1] - rstcpi_[h1] - frzcpi_[h1] - rstvpi_[h1] - frzvpi_[h1];
     }
 
-    if ( constrain_g2_ ) {
-        G2_constraints_guess(x_p);
+    // d2bb
+    poff1 = 0;
+    for (int h1 = 0; h1 < nirrep_; h1++) {
+      for (int i = 0; i < doccpi_[h1] - rstcpi_[h1] - frzcpi_[h1]; i++) {
+        int poff2 = 0;
+        for (int h2 = 0; h2 < nirrep_; h2++) {
+          for (int j = 0; j < doccpi_[h2] - rstcpi_[h2] - frzcpi_[h2]; j++) {
+            int ii = i + poff1;
+            int jj = j + poff2;
+            if (jj >= ii)
+              continue;
+            int h3 = SymmetryPair(symmetry[ii], symmetry[jj]);
+            int ij = ibas_aa_sym[h3][ii][jj];
+            x_p[d2bboff[h3] + ij * gems_aa[h3] + ij] = 1.0;
+          }
+          poff2 += nmopi_[h2] - rstcpi_[h2] - frzcpi_[h2] - rstvpi_[h2] -
+                   frzvpi_[h2];
+        }
+      }
+      poff1 +=
+          nmopi_[h1] - rstcpi_[h1] - frzcpi_[h1] - rstvpi_[h1] - frzvpi_[h1];
     }
 
-    if ( constrain_t1_ ) {
-        T1_constraints_guess(x_p);
+    // D1
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = rstcpi_[h] + frzcpi_[h]; i < doccpi_[h] + soccpi_[h]; i++) {
+        int ii = i - rstcpi_[h] - frzcpi_[h];
+        x_p[d1aoff[h] + ii * amopi_[h] + ii] = 1.0;
+      }
+      for (int i = rstcpi_[h] + frzcpi_[h]; i < doccpi_[h]; i++) {
+        int ii = i - rstcpi_[h] - frzcpi_[h];
+        x_p[d1boff[h] + ii * amopi_[h] + ii] = 1.0;
+      }
+      // Q1
+      for (int i = doccpi_[h] + soccpi_[h];
+           i < nmopi_[h] - rstvpi_[h] - frzvpi_[h]; i++) {
+        int ii = i - rstcpi_[h] - frzcpi_[h];
+        x_p[q1aoff[h] + ii * amopi_[h] + ii] = 1.0;
+      }
+      for (int i = doccpi_[h]; i < nmopi_[h] - rstvpi_[h] - frzvpi_[h]; i++) {
+        int ii = i - rstcpi_[h] - frzcpi_[h];
+        x_p[q1boff[h] + ii * amopi_[h] + ii] = 1.0;
+      }
     }
-    if ( constrain_t2_ ) {
-        T2_constraints_guess(x_p);
-    }
+  } else { // random guess
 
+    srand(0);
+    for (int i = 0; i < n_primal_; i++) {
+      x_p[i] = ((double)rand() / RAND_MAX - 1.0) * 2.0;
+    }
+    return;
+  }
+
+  if (constrain_q2_) {
+    Q2_constraints_guess(x_p);
+  }
+
+  if (constrain_g2_) {
+    G2_constraints_guess(x_p);
+  }
+
+  if (constrain_t1_) {
+    T1_constraints_guess(x_p);
+  }
+  if (constrain_t2_) {
+    T2_constraints_guess(x_p);
+  }
 }
 
-void v2RDMSolver::BuildConstraints(){
+void v2RDMSolver::BuildConstraints() {
 
-    //constraint on the Trace of D2(s=0,ms=0)
+  // constraint on the Trace of D2(s=0,ms=0)
 
-    double na = nalpha_ - nfrzc_ - nrstc_;
-    double nb = nbeta_ - nfrzc_ - nrstc_;
-    double trdab = na * nb;
+  double na = nalpha_ - nfrzc_ - nrstc_;
+  double nb = nbeta_ - nfrzc_ - nrstc_;
+  double trdab = na * nb;
 
-    //constraint on the Trace of D2(s=1,ms=0)
-    double trdaa  = na*(na-1.0);
-    double trdbb  = nb*(nb-1.0);
-    double n = na + nb;
-    double trd    = n*(n-1.0);
+  // constraint on the Trace of D2(s=1,ms=0)
+  double trdaa = na * (na - 1.0);
+  double trdbb = nb * (nb - 1.0);
+  double n = na + nb;
+  double trd = n * (n - 1.0);
 
-    b->zero();
-    double* b_p = b->pointer();
+  b->zero();
+  double *b_p = b->pointer();
 
-    offset = 0;
+  offset = 0;
 
-    ///Trace of D2(s=0,ms=0) and D2(s=1,ms=0)
-    if ( constrain_sz_ ) {
-        b_p[offset++] = trdab;
-        b_p[offset++] = trdaa;
-        b_p[offset++] = trdbb;
-    }else{
-        b_p[offset++] = trd;
+  /// Trace of D2(s=0,ms=0) and D2(s=1,ms=0)
+  if (constrain_sz_) {
+    b_p[offset++] = trdab;
+    b_p[offset++] = trdaa;
+    b_p[offset++] = trdbb;
+  } else {
+    b_p[offset++] = trd;
+  }
+
+  // hermiticity
+  for (int h = 0; h < nirrep_; h++) {
+    for (int ij = 0; ij < gems_aa[h]; ij++) {
+      for (int kl = 0; kl < gems_aa[h]; kl++) {
+        b_p[offset++] = 0.0;
+      }
     }
+  }
+  for (int h = 0; h < nirrep_; h++) {
+    for (int ij = 0; ij < gems_aa[h]; ij++) {
+      for (int kl = 0; kl < gems_aa[h]; kl++) {
+        b_p[offset++] = 0.0;
+      }
+    }
+  }
+  for (int h = 0; h < nirrep_; h++) {
+    for (int ij = 0; ij < gems_ab[h]; ij++) {
+      for (int kl = 0; kl < gems_ab[h]; kl++) {
+        b_p[offset++] = 0.0;
+      }
+    }
+  }
 
-    // hermiticity
+  // d1 / q1 a
+  for (int h = 0; h < nirrep_; h++) {
+    for (int i = 0; i < amopi_[h]; i++) {
+      for (int j = 0; j < amopi_[h]; j++) {
+        b_p[offset + i * amopi_[h] + j] = (double)(i == j);
+      }
+    }
+    offset += amopi_[h] * amopi_[h];
+  }
+
+  // d1 / q1 b
+  for (int h = 0; h < nirrep_; h++) {
+    for (int i = 0; i < amopi_[h]; i++) {
+      for (int j = 0; j < amopi_[h]; j++) {
+        b_p[offset + i * amopi_[h] + j] = (double)(i == j);
+      }
+    }
+    offset += amopi_[h] * amopi_[h];
+  }
+
+  if (constrain_sz_) {
+    // contract D2ab -> D1a
     for (int h = 0; h < nirrep_; h++) {
-        for (int ij = 0; ij < gems_aa[h]; ij++) {
-            for (int kl = 0; kl < gems_aa[h]; kl++) {
-                b_p[offset++] = 0.0;
-            }
+      for (int i = 0; i < amopi_[h]; i++) {
+        for (int j = 0; j < amopi_[h]; j++) {
+          b_p[offset + i * amopi_[h] + j] = 0.0;
         }
+      }
+      offset += amopi_[h] * amopi_[h];
     }
+
+    // contract D2ab -> D1b
     for (int h = 0; h < nirrep_; h++) {
-        for (int ij = 0; ij < gems_aa[h]; ij++) {
-            for (int kl = 0; kl < gems_aa[h]; kl++) {
-                b_p[offset++] = 0.0;
-            }
+      for (int i = 0; i < amopi_[h]; i++) {
+        for (int j = 0; j < amopi_[h]; j++) {
+          b_p[offset + i * amopi_[h] + j] = 0.0;
         }
+      }
+      offset += amopi_[h] * amopi_[h];
     }
+    // contract D2aa -> D1a
     for (int h = 0; h < nirrep_; h++) {
-        for (int ij = 0; ij < gems_ab[h]; ij++) {
-            for (int kl = 0; kl < gems_ab[h]; kl++) {
-                b_p[offset++] = 0.0;
-            }
+      for (int i = 0; i < amopi_[h]; i++) {
+        for (int j = 0; j < amopi_[h]; j++) {
+          b_p[offset + i * amopi_[h] + j] = 0.0;
         }
+      }
+      offset += amopi_[h] * amopi_[h];
     }
-
-    // d1 / q1 a
+    // contract D2bb -> D1b
     for (int h = 0; h < nirrep_; h++) {
-        for(int i = 0; i < amopi_[h]; i++){
-            for(int j = 0; j < amopi_[h]; j++){
-                b_p[offset + i*amopi_[h]+j] = (double)(i==j);
-            }
+      for (int i = 0; i < amopi_[h]; i++) {
+        for (int j = 0; j < amopi_[h]; j++) {
+          b_p[offset + i * amopi_[h] + j] = 0.0;
         }
-        offset += amopi_[h]*amopi_[h];
+      }
+      offset += amopi_[h] * amopi_[h];
     }
-
-    // d1 / q1 b
+  } else {
+    // contract D2aa + D2ab -> D1a
     for (int h = 0; h < nirrep_; h++) {
-        for(int i = 0; i < amopi_[h]; i++){
-            for(int j = 0; j < amopi_[h]; j++){
-                b_p[offset + i*amopi_[h]+j] = (double)(i==j);
-            }
+      for (int i = 0; i < amopi_[h]; i++) {
+        for (int j = 0; j < amopi_[h]; j++) {
+          b_p[offset + i * amopi_[h] + j] = 0.0;
         }
-        offset += amopi_[h]*amopi_[h];
+      }
+      offset += amopi_[h] * amopi_[h];
     }
 
-    if ( constrain_sz_ ) {
-        //contract D2ab -> D1a
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < amopi_[h]; i++){
-                for(int j = 0; j < amopi_[h]; j++){
-                    b_p[offset + i*amopi_[h]+j] = 0.0;
-                }
-            }
-            offset += amopi_[h]*amopi_[h];
+    // contract D2bb + D2ab -> D1b
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < amopi_[h]; i++) {
+        for (int j = 0; j < amopi_[h]; j++) {
+          b_p[offset + i * amopi_[h] + j] = 0.0;
         }
+      }
+      offset += amopi_[h] * amopi_[h];
+    }
+  }
 
-        //contract D2ab -> D1b
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < amopi_[h]; i++){
-                for(int j = 0; j < amopi_[h]; j++){
-                    b_p[offset + i*amopi_[h]+j] = 0.0;
-                }
-            }
-            offset += amopi_[h]*amopi_[h];
-        }
-        //contract D2aa -> D1a
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < amopi_[h]; i++){
-                for(int j = 0; j < amopi_[h]; j++){
-                    b_p[offset + i*amopi_[h]+j] = 0.0;
-                }
-            }
-            offset += amopi_[h]*amopi_[h];
-        }
-        //contract D2bb -> D1b
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < amopi_[h]; i++){
-                for(int j = 0; j < amopi_[h]; j++){
-                    b_p[offset + i*amopi_[h]+j] = 0.0;
-                }
-            }
-            offset += amopi_[h]*amopi_[h];
-        }
-    }else {
-        //contract D2aa + D2ab -> D1a
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < amopi_[h]; i++){
-                for(int j = 0; j < amopi_[h]; j++){
-                    b_p[offset + i*amopi_[h]+j] = 0.0;
-                }
-            }
-            offset += amopi_[h]*amopi_[h];
-        }
+  if (constrain_spin_) {
 
-        //contract D2bb + D2ab -> D1b
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < amopi_[h]; i++){
-                for(int j = 0; j < amopi_[h]; j++){
-                    b_p[offset + i*amopi_[h]+j] = 0.0;
-                }
-            }
-            offset += amopi_[h]*amopi_[h];
-        }
+    // funny ab trace with spin: N/2 + Ms^2 - S(S+1)
+    double ms = (multiplicity_ - 1.0) / 2.0;
+    b_p[offset++] = (0.5 * (na + nb) + ms * ms - ms * (ms + 1.0));
+
+    // additional spin constraints for singlets:
+    if (nalpha_ == nbeta_) {
+      for (int h = 0; h < nirrep_; h++) {
+        offset += amopi_[h] * amopi_[h]; // D1a = D1b
+      }
+      for (int h = 0; h < nirrep_; h++) {
+        offset += gems_aa[h] * gems_aa[h]; // D2aa = D2bb
+      }
+      for (int h = 0; h < nirrep_; h++) {
+        offset += gems_aa[h] *
+                  gems_aa[h]; // D2aa[pq][rs] = 1/2(D2ab[pq][rs] - D2ab[pq][sr]
+                              // - D2ab[qp][rs] + D2ab[qp][sr])
+      }
+      for (int h = 0; h < nirrep_; h++) {
+        offset += gems_aa[h] *
+                  gems_aa[h]; // D2bb[pq][rs] = 1/2(D2ab[pq][rs] - D2ab[pq][sr]
+                              // - D2ab[qp][rs] + D2ab[qp][sr]))
+      }
+      for (int h = 0; h < nirrep_; h++) {
+        offset += gems_ab[h] *
+                  gems_ab[h]; // D200[pq][rs] =
+                              // 1/(sqrt(1+dpq)sqrt(1+drs))(D2ab[pq][rs] +
+                              // D2ab[pq][sr] + D2ab[qp][rs] + D2ab[qp][sr])
+      }
+      for (int h = 0; h < nirrep_; h++) {
+        offset += gems_ab[h] * gems_ab[h]; // D2ab[pq][rs] = D2ab[qp][sr]
+      }
+    } else { // nonsinglets
+      for (int h = 0; h < nirrep_; h++) {
+        offset += 4 * gems_ab[h] * gems_ab[h]; // D200_0, D210_0, D201_0, D211_0
+      }
     }
 
-    if ( constrain_spin_ ) {
+    // maximal spin constraints:
+    if (constrain_g2_) {
+      for (int i = 0; i < gems_ab[0]; i++) {
+        b_p[offset++] = 0.0;
+      }
+      for (int i = 0; i < gems_ab[0]; i++) {
+        b_p[offset++] = 0.0;
+      }
+    }
+  }
 
-        // funny ab trace with spin: N/2 + Ms^2 - S(S+1)
-        double ms = (multiplicity_-1.0)/2.0;
-        b_p[offset++] = (0.5 * (na + nb) + ms*ms - ms*(ms+1.0));
-
-        // additional spin constraints for singlets:
-        if ( nalpha_ == nbeta_ ) {
-            for ( int h = 0; h < nirrep_; h++) {
-                offset += amopi_[h]*amopi_[h]; // D1a = D1b
-            }
-            for ( int h = 0; h < nirrep_; h++) {
-                offset += gems_aa[h]*gems_aa[h]; // D2aa = D2bb
-            }
-            for ( int h = 0; h < nirrep_; h++) {
-                offset += gems_aa[h]*gems_aa[h]; // D2aa[pq][rs] = 1/2(D2ab[pq][rs] - D2ab[pq][sr] - D2ab[qp][rs] + D2ab[qp][sr])
-            }
-            for ( int h = 0; h < nirrep_; h++) {
-                offset += gems_aa[h]*gems_aa[h]; // D2bb[pq][rs] = 1/2(D2ab[pq][rs] - D2ab[pq][sr] - D2ab[qp][rs] + D2ab[qp][sr]))
-            }
-            for ( int h = 0; h < nirrep_; h++) {
-                offset += gems_ab[h]*gems_ab[h]; // D200[pq][rs] = 1/(sqrt(1+dpq)sqrt(1+drs))(D2ab[pq][rs] + D2ab[pq][sr] + D2ab[qp][rs] + D2ab[qp][sr])
-            }
-            for ( int h = 0; h < nirrep_; h++) {
-                offset += gems_ab[h]*gems_ab[h]; // D2ab[pq][rs] = D2ab[qp][sr]
-            }
-        }else { // nonsinglets
-            for ( int h = 0; h < nirrep_; h++) {
-                offset += 4*gems_ab[h]*gems_ab[h]; // D200_0, D210_0, D201_0, D211_0
-            }
+  if (constrain_q2_) {
+    // map d2ab to q2ab
+    for (int h = 0; h < nirrep_; h++) {
+      for (int ij = 0; ij < gems_ab[h]; ij++) {
+        int i = bas_ab_sym[h][ij][0];
+        int j = bas_ab_sym[h][ij][1];
+        for (int kl = 0; kl < gems_ab[h]; kl++) {
+          int k = bas_ab_sym[h][kl][0];
+          int l = bas_ab_sym[h][kl][1];
+          b_p[offset + ij * gems_ab[h] + kl] = -(i == k) * (j == l);
         }
-
-        // maximal spin constraints:
-        if ( constrain_g2_ ) {
-            for (int i = 0; i < gems_ab[0]; i++){
-                b_p[offset++] = 0.0;
-            }
-            for (int i = 0; i < gems_ab[0]; i++){
-                b_p[offset++] = 0.0;
-            }
-        }
+      }
+      offset += gems_ab[h] * gems_ab[h];
     }
 
-    if ( constrain_q2_ ) {
-        // map d2ab to q2ab
-        for (int h = 0; h < nirrep_; h++) {
-            for(int ij = 0; ij < gems_ab[h]; ij++){
-                int i = bas_ab_sym[h][ij][0];
-                int j = bas_ab_sym[h][ij][1];
-                for(int kl = 0; kl < gems_ab[h]; kl++){
-                    int k = bas_ab_sym[h][kl][0];
-                    int l = bas_ab_sym[h][kl][1];
-                    b_p[offset + ij*gems_ab[h]+kl] = -(i==k)*(j==l);
-                }
-            }
-            offset += gems_ab[h]*gems_ab[h];
+    // map d2aa to q2aa
+    for (int h = 0; h < nirrep_; h++) {
+      for (int ij = 0; ij < gems_aa[h]; ij++) {
+        int i = bas_aa_sym[h][ij][0];
+        int j = bas_aa_sym[h][ij][1];
+        for (int kl = 0; kl < gems_aa[h]; kl++) {
+          int k = bas_aa_sym[h][kl][0];
+          int l = bas_aa_sym[h][kl][1];
+          b_p[offset + ij * gems_aa[h] + kl] =
+              -(i == k) * (j == l) + (i == l) * (j == k);
         }
-
-        // map d2aa to q2aa
-        for (int h = 0; h < nirrep_; h++) {
-            for(int ij = 0; ij < gems_aa[h]; ij++){
-                int i = bas_aa_sym[h][ij][0];
-                int j = bas_aa_sym[h][ij][1];
-                for(int kl = 0; kl < gems_aa[h]; kl++){
-                    int k = bas_aa_sym[h][kl][0];
-                    int l = bas_aa_sym[h][kl][1];
-                    b_p[offset + ij*gems_aa[h]+kl] = -(i==k)*(j==l) + (i==l)*(j==k);
-                }
-            }
-            offset += gems_aa[h]*gems_aa[h];
-        }
-
-        // map d2bb to q2bb
-        for (int h = 0; h < nirrep_; h++) {
-            for(int ij = 0; ij < gems_aa[h]; ij++){
-                int i = bas_aa_sym[h][ij][0];
-                int j = bas_aa_sym[h][ij][1];
-                for(int kl = 0; kl < gems_aa[h]; kl++){
-                    int k = bas_aa_sym[h][kl][0];
-                    int l = bas_aa_sym[h][kl][1];
-                    b_p[offset + ij*gems_aa[h]+kl] = -(i==k)*(j==l) + (i==l)*(j==k);
-                }
-            }
-            offset += gems_aa[h]*gems_aa[h];
-        }
+      }
+      offset += gems_aa[h] * gems_aa[h];
     }
 
-    if ( constrain_g2_ ) {
-        // map d2 and d1 to g2ab
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < gems_ab[h]; i++){
-                for(int j = 0; j < gems_ab[h]; j++){
-                    b_p[offset + i*gems_ab[h]+j] = 0.0;
-                }
-            }
-            offset += gems_ab[h]*gems_ab[h];
+    // map d2bb to q2bb
+    for (int h = 0; h < nirrep_; h++) {
+      for (int ij = 0; ij < gems_aa[h]; ij++) {
+        int i = bas_aa_sym[h][ij][0];
+        int j = bas_aa_sym[h][ij][1];
+        for (int kl = 0; kl < gems_aa[h]; kl++) {
+          int k = bas_aa_sym[h][kl][0];
+          int l = bas_aa_sym[h][kl][1];
+          b_p[offset + ij * gems_aa[h] + kl] =
+              -(i == k) * (j == l) + (i == l) * (j == k);
         }
+      }
+      offset += gems_aa[h] * gems_aa[h];
+    }
+  }
 
-        // map d2 and d1 to g2ba
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < gems_ab[h]; i++){
-                for(int j = 0; j < gems_ab[h]; j++){
-                    b_p[offset + i*gems_ab[h]+j] = 0.0;
-                }
-            }
-            offset += gems_ab[h]*gems_ab[h];
+  if (constrain_g2_) {
+    // map d2 and d1 to g2ab
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < gems_ab[h]; i++) {
+        for (int j = 0; j < gems_ab[h]; j++) {
+          b_p[offset + i * gems_ab[h] + j] = 0.0;
         }
-
-        // map d2 and d1 to g2aa
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < 2*gems_ab[h]; i++){
-                for(int j = 0; j < 2*gems_ab[h]; j++){
-                    b_p[offset + i*2*gems_ab[h]+j] = 0.0;
-                }
-            }
-            offset += 2*gems_ab[h]*2*gems_ab[h];
-        }
+      }
+      offset += gems_ab[h] * gems_ab[h];
     }
 
-    if ( constrain_t1_ ) {
-        // T1aaa
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < trip_aaa[h]; i++){
-                for(int j = 0; j < trip_aaa[h]; j++){
-                    b_p[offset + i*trip_aaa[h]+j] = 0.0;
-                }
-            }
-            offset += trip_aaa[h]*trip_aaa[h];
+    // map d2 and d1 to g2ba
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < gems_ab[h]; i++) {
+        for (int j = 0; j < gems_ab[h]; j++) {
+          b_p[offset + i * gems_ab[h] + j] = 0.0;
         }
-        // T1bbb
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < trip_aaa[h]; i++){
-                for(int j = 0; j < trip_aaa[h]; j++){
-                    b_p[offset + i*trip_aaa[h]+j] = 0.0;
-                }
-            }
-            offset += trip_aaa[h]*trip_aaa[h];
-        }
-        // T1aab
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < trip_aab[h]; i++){
-                for(int j = 0; j < trip_aab[h]; j++){
-                    b_p[offset + i*trip_aab[h]+j] = 0.0;
-                }
-            }
-            offset += trip_aab[h]*trip_aab[h];
-        }
-        // T1bba
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < trip_aab[h]; i++){
-                for(int j = 0; j < trip_aab[h]; j++){
-                    b_p[offset + i*trip_aab[h]+j] = 0.0;
-                }
-            }
-            offset += trip_aab[h]*trip_aab[h];
-        }
+      }
+      offset += gems_ab[h] * gems_ab[h];
     }
 
-    if ( constrain_t2_ ) {
-        // T2aaa
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < trip_aba[h]+trip_aab[h]; i++){
-                for(int j = 0; j < trip_aba[h] + trip_aab[h]; j++){
-                    b_p[offset + i*(trip_aab[h]+trip_aba[h])+j] = 0.0;
-                }
-            }
-            offset += (trip_aba[h]+trip_aab[h])*(trip_aba[h]+trip_aab[h]);
+    // map d2 and d1 to g2aa
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < 2 * gems_ab[h]; i++) {
+        for (int j = 0; j < 2 * gems_ab[h]; j++) {
+          b_p[offset + i * 2 * gems_ab[h] + j] = 0.0;
         }
-        // T2bbb
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < trip_aba[h]+trip_aab[h]; i++){
-                for(int j = 0; j < trip_aba[h] + trip_aab[h]; j++){
-                    b_p[offset + i*(trip_aab[h]+trip_aba[h])+j] = 0.0;
-                }
-            }
-            offset += (trip_aba[h]+trip_aab[h])*(trip_aba[h]+trip_aab[h]);
-        }
-        // T2aab
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < trip_aab[h]; i++){
-                for(int j = 0; j < trip_aab[h]; j++){
-                    b_p[offset + i*trip_aab[h]+j] = 0.0;
-                }
-            }
-            offset += trip_aab[h]*trip_aab[h];
-        }
-        // T2bba
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < trip_aab[h]; i++){
-                for(int j = 0; j < trip_aab[h]; j++){
-                    b_p[offset + i*trip_aab[h]+j] = 0.0;
-                }
-            }
-            offset += trip_aab[h]*trip_aab[h];
-        }
+      }
+      offset += 2 * gems_ab[h] * 2 * gems_ab[h];
     }
-    if ( constrain_e3_ ) {
-        // E3aaa
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < trip_aba[h]+trip_aab[h]; i++){
-                for(int j = 0; j < trip_aba[h] + trip_aab[h]; j++){
-                    b_p[offset + i*(trip_aab[h]+trip_aba[h])+j] = 0.0;
-                }
-            }
-            offset += (trip_aba[h]+trip_aab[h])*(trip_aba[h]+trip_aab[h]);
+  }
+
+  if (constrain_t1_) {
+    // T1aaa
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < trip_aaa[h]; i++) {
+        for (int j = 0; j < trip_aaa[h]; j++) {
+          b_p[offset + i * trip_aaa[h] + j] = 0.0;
         }
-        // E3bbb
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < trip_aba[h]+trip_aab[h]; i++){
-                for(int j = 0; j < trip_aba[h] + trip_aab[h]; j++){
-                    b_p[offset + i*(trip_aab[h]+trip_aba[h])+j] = 0.0;
-                }
-            }
-            offset += (trip_aba[h]+trip_aab[h])*(trip_aba[h]+trip_aab[h]);
-        }
-        // E3aab
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < trip_aab[h]; i++){
-                for(int j = 0; j < trip_aab[h]; j++){
-                    b_p[offset + i*trip_aab[h]+j] = 0.0;
-                }
-            }
-            offset += trip_aab[h]*trip_aab[h];
-        }
-        // E3bba
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < trip_aab[h]; i++){
-                for(int j = 0; j < trip_aab[h]; j++){
-                    b_p[offset + i*trip_aab[h]+j] = 0.0;
-                }
-            }
-            offset += trip_aab[h]*trip_aab[h];
-        }
+      }
+      offset += trip_aaa[h] * trip_aaa[h];
     }
-    if ( constrain_f3_ ) {
-        // F3aaa
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < trip_aba[h]+trip_aab[h]; i++){
-                for(int j = 0; j < trip_aba[h] + trip_aab[h]; j++){
-                    b_p[offset + i*(trip_aab[h]+trip_aba[h])+j] = 0.0;
-                }
-            }
-            offset += (trip_aba[h]+trip_aab[h])*(trip_aba[h]+trip_aab[h]);
+    // T1bbb
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < trip_aaa[h]; i++) {
+        for (int j = 0; j < trip_aaa[h]; j++) {
+          b_p[offset + i * trip_aaa[h] + j] = 0.0;
         }
-        // F3bbb
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < trip_aba[h]+trip_aab[h]; i++){
-                for(int j = 0; j < trip_aba[h] + trip_aab[h]; j++){
-                    b_p[offset + i*(trip_aab[h]+trip_aba[h])+j] = 0.0;
-                }
-            }
-            offset += (trip_aba[h]+trip_aab[h])*(trip_aba[h]+trip_aab[h]);
-        }
-        // F3aab
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < trip_aab[h]; i++){
-                for(int j = 0; j < trip_aab[h]; j++){
-                    b_p[offset + i*trip_aab[h]+j] = 0.0;
-                }
-            }
-            offset += trip_aab[h]*trip_aab[h];
-        }
-        // F3bba
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < trip_aab[h]; i++){
-                for(int j = 0; j < trip_aab[h]; j++){
-                    b_p[offset + i*trip_aab[h]+j] = 0.0;
-                }
-            }
-            offset += trip_aab[h]*trip_aab[h];
-        }
+      }
+      offset += trip_aaa[h] * trip_aaa[h];
     }
-
-    if ( constrain_q3_ ) {
-        // Q3aaa
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < trip_aaa[h]; i++){
-                for(int j = 0; j < trip_aaa[h]; j++){
-                    b_p[offset + i*trip_aaa[h]+j] = 0.0;
-                }
-            }
-            offset += trip_aaa[h]*trip_aaa[h];
+    // T1aab
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < trip_aab[h]; i++) {
+        for (int j = 0; j < trip_aab[h]; j++) {
+          b_p[offset + i * trip_aab[h] + j] = 0.0;
         }
-        // Q3bbb
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < trip_aaa[h]; i++){
-                for(int j = 0; j < trip_aaa[h]; j++){
-                    b_p[offset + i*trip_aaa[h]+j] = 0.0;
-                }
-            }
-            offset += trip_aaa[h]*trip_aaa[h];
-        }
-        // Q3aab
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < trip_aab[h]; i++){
-                for(int j = 0; j < trip_aab[h]; j++){
-                    b_p[offset + i*trip_aab[h]+j] = 0.0;
-                }
-            }
-            offset += trip_aab[h]*trip_aab[h];
-        }
-        // Q3bba
-        for (int h = 0; h < nirrep_; h++) {
-            for(int i = 0; i < trip_aab[h]; i++){
-                for(int j = 0; j < trip_aab[h]; j++){
-                    b_p[offset + i*trip_aab[h]+j] = 0.0;
-                }
-            }
-            offset += trip_aab[h]*trip_aab[h];
-        }
+      }
+      offset += trip_aab[h] * trip_aab[h];
     }
-
-    if ( constrain_d3_ ) {
-        if ( constrain_sz_ ) {
-            //if (  nalpha_ - nrstc_ - nfrzc_ > 2 ) {
-                // D3aaa -> D2aa
-                for (int h = 0; h < nirrep_; h++) {
-                    for(int i = 0; i < gems_aa[h]; i++){
-                        for(int j = 0; j < gems_aa[h]; j++){
-                            b_p[offset + i*gems_aa[h]+j] = 0.0;
-                        }
-                    }
-                    offset += gems_aa[h]*gems_aa[h];
-                }
-            //}
-            //if (  nbeta_ - nrstc_ - nfrzc_ > 2 ) {
-                // D3bbb -> D2bb
-                for (int h = 0; h < nirrep_; h++) {
-                    for(int i = 0; i < gems_aa[h]; i++){
-                        for(int j = 0; j < gems_aa[h]; j++){
-                            b_p[offset + i*gems_aa[h]+j] = 0.0;
-                        }
-                    }
-                    offset += gems_aa[h]*gems_aa[h];
-                }
-            //}
-            //if (  nalpha_ - nrstc_ - nfrzc_ > 1 ) {
-                // D3aab -> D2aa
-                for (int h = 0; h < nirrep_; h++) {
-                    for(int i = 0; i < gems_aa[h]; i++){
-                        for(int j = 0; j < gems_aa[h]; j++){
-                            b_p[offset + i*gems_aa[h]+j] = 0.0;
-                        }
-                    }
-                    offset += gems_aa[h]*gems_aa[h];
-                }
-            //}
-            //if (  nbeta_ - nrstc_ - nfrzc_ > 1 ) {
-                // D3bba -> D2bb
-                for (int h = 0; h < nirrep_; h++) {
-                    for(int i = 0; i < gems_aa[h]; i++){
-                        for(int j = 0; j < gems_aa[h]; j++){
-                            b_p[offset + i*gems_aa[h]+j] = 0.0;
-                        }
-                    }
-                    offset += gems_aa[h]*gems_aa[h];
-                }
-            //}
-            //if (  nalpha_ - nrstc_ - nfrzc_ > 1 ) {
-                // D3aab -> D2ab
-                for (int h = 0; h < nirrep_; h++) {
-                    for(int i = 0; i < gems_ab[h]; i++){
-                        for(int j = 0; j < gems_ab[h]; j++){
-                            b_p[offset + i*gems_ab[h]+j] = 0.0;
-                        }
-                    }
-                    offset += gems_ab[h]*gems_ab[h];
-                }
-            //}
-            //if (  nbeta_ - nrstc_ - nfrzc_ > 1 ) {
-                // D3bba -> D2ab
-                for (int h = 0; h < nirrep_; h++) {
-                    for(int i = 0; i < gems_ab[h]; i++){
-                        for(int j = 0; j < gems_ab[h]; j++){
-                            b_p[offset + i*gems_ab[h]+j] = 0.0;
-                        }
-                    }
-                    offset += gems_ab[h]*gems_ab[h];
-                }
-            //}
-        }else {
-            // D3aaa + D3aab -> D2aa
-            for (int h = 0; h < nirrep_; h++) {
-                for(int i = 0; i < gems_aa[h]; i++){
-                    for(int j = 0; j < gems_aa[h]; j++){
-                        b_p[offset + i*gems_aa[h]+j] = 0.0;
-                    }
-                }
-                offset += gems_aa[h]*gems_aa[h];
-            }
-            // D3bbb + D3bba -> D2bb
-            for (int h = 0; h < nirrep_; h++) {
-                for(int i = 0; i < gems_aa[h]; i++){
-                    for(int j = 0; j < gems_aa[h]; j++){
-                        b_p[offset + i*gems_aa[h]+j] = 0.0;
-                    }
-                }
-                offset += gems_aa[h]*gems_aa[h];
-            }
-            // D3abb + D3bba -> D2ab
-            for (int h = 0; h < nirrep_; h++) {
-                for(int i = 0; i < gems_ab[h]; i++){
-                    for(int j = 0; j < gems_ab[h]; j++){
-                        b_p[offset + i*gems_ab[h]+j] = 0.0;
-                    }
-                }
-                offset += gems_ab[h]*gems_ab[h];
-            }
+    // T1bba
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < trip_aab[h]; i++) {
+        for (int j = 0; j < trip_aab[h]; j++) {
+          b_p[offset + i * trip_aab[h] + j] = 0.0;
         }
-        // additional spin constraints for singlets:
-        if ( constrain_spin_ && nalpha_ == nbeta_ ) {
-            for (int h = 0; h < nirrep_; h++) {
-                offset += trip_aab[h]*trip_aab[h]; // D3aab = D3bba
-            }
-            for (int h = 0; h < nirrep_; h++) {
-                offset += trip_aaa[h]*trip_aaa[h]; // D3aab -> D3aaa
-                offset += trip_aaa[h]*trip_aaa[h]; // D3bba -> D3bbb
-            }
-        }
+      }
+      offset += trip_aab[h] * trip_aab[h];
     }
-    if ( constrain_d4_ ) {
-        if (  nalpha_ - nrstc_ - nfrzc_ > 3 ) {
-            // D4aaaa -> D3aaa
-            for (int h = 0; h < nirrep_; h++) {
-                offset += trip_aaa[h]*trip_aaa[h];
-            }
+  }
+
+  if (constrain_t2_) {
+    // T2aaa
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < trip_aba[h] + trip_aab[h]; i++) {
+        for (int j = 0; j < trip_aba[h] + trip_aab[h]; j++) {
+          b_p[offset + i * (trip_aab[h] + trip_aba[h]) + j] = 0.0;
         }
-        if (  nalpha_ - nrstc_ - nfrzc_ > 2 && nbeta_ - nrstc_ - nfrzc_ > 0) {
-            // D4aaab -> D3aaa
-            for (int h = 0; h < nirrep_; h++) {
-                offset += trip_aaa[h]*trip_aaa[h];
-            }
-            // D4aaab -> D3aab
-            for (int h = 0; h < nirrep_; h++) {
-                offset += trip_aab[h]*trip_aab[h];
-            }
-        }
-        if (  nalpha_ - nrstc_ - nfrzc_ > 1 && nbeta_ - nrstc_ - nfrzc_ > 1) {
-            // D4aabb -> D3aab
-            for (int h = 0; h < nirrep_; h++) {
-                offset += trip_aab[h]*trip_aab[h];
-            }
-            // D4aabb -> D3abb
-            for (int h = 0; h < nirrep_; h++) {
-                offset += trip_aab[h]*trip_aab[h];
-            }
-        }
-        if (  nalpha_ - nrstc_ - nfrzc_ > 0 && nbeta_ - nrstc_ - nfrzc_ > 2) {
-            // D4abbb -> D3bbb
-            for (int h = 0; h < nirrep_; h++) {
-                offset += trip_aaa[h]*trip_aaa[h];
-            }
-            // D4abbb -> D3aab
-            for (int h = 0; h < nirrep_; h++) {
-                offset += trip_aab[h]*trip_aab[h];
-            }
-        }
-        if (  nbeta_ - nrstc_ - nfrzc_ > 3) {
-            // D4bbbb -> D3bbb
-            for (int h = 0; h < nirrep_; h++) {
-                offset += trip_aaa[h]*trip_aaa[h];
-            }
-        }
+      }
+      offset += (trip_aba[h] + trip_aab[h]) * (trip_aba[h] + trip_aab[h]);
     }
-
-    // generalized pauli constraints
-
-    if ( constrain_gpc_ ) {
-
-        // set constraints for every state to which gpc are applied
-        for (int my_state = 0; my_state < n_gpc_states_; my_state++) {
-
-            if ( gpc_[my_state] == GeneralizedPauli_3_8 || gpc_[my_state] == GeneralizedPauli_5_8 ) {
-
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 3.0;
-
-                //b_p[offset++] = 0.0; // force one orbital occupation to zero
-
-                b_p[offset++] = 1.0; //  ## Extended Pauli inequality: lambda[1]+lambda[8]<=1 ##
-
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 3.0;
-                b_p[offset++] = 3.0;
-                b_p[offset++] = 3.0;
-                b_p[offset++] = 3.0;
-                b_p[offset++] = 3.0;
-                b_p[offset++] = 3.0;
-                b_p[offset++] = 3.0;
-                b_p[offset++] = 5.0;
-                b_p[offset++] = 5.0;
-                b_p[offset++] = 5.0;
-                b_p[offset++] = 5.0;
-                b_p[offset++] = 5.0;
-                b_p[offset++] = 5.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-
-/*
-                b_p[offset++] = 2.0;
-                b_p[offset++] = 2.0;
-                b_p[offset++] = 2.0;
-                b_p[offset++] = 2.0;
-
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 1.0;
-
-                b_p[offset++] = 1.0;
-
-                b_p[offset++] = 0.0;
-                b_p[offset++] = 0.0;
-                b_p[offset++] = 0.0;
-
-                b_p[offset++] = 2.0;
-                b_p[offset++] = 2.0;
-                b_p[offset++] = 2.0;
-                b_p[offset++] = 2.0;
-
-                b_p[offset++] = 0.0;
-                b_p[offset++] = 0.0;
-                b_p[offset++] = 0.0;
-                b_p[offset++] = 0.0;
-
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 1.0;
-
-                b_p[offset++] = 0.0;
-                b_p[offset++] = 0.0;
-                b_p[offset++] = 0.0;
-                b_p[offset++] = 0.0;
-*/
-            }else if ( gpc_[my_state] == GeneralizedPauli_4_8 ) {
-
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 1.0;
-                b_p[offset++] = 0.0;
-                b_p[offset++] = 0.0;
-                b_p[offset++] = 0.0;
-                b_p[offset++] = 0.0;
-                b_p[offset++] = 0.0;
-                b_p[offset++] = 0.0;
-                b_p[offset++] = 0.0;
-                b_p[offset++] = 2.0;
-                b_p[offset++] = 2.0;
-                b_p[offset++] = 2.0;
-                b_p[offset++] = 2.0;
-                b_p[offset++] = 2.0;
-                b_p[offset++] = 2.0;
-                b_p[offset++] = 2.0;
-
-/*
-                //b_p[offset++] = 1.0;
-
-                double small = 0.0;//r_convergence_;
-                double scale = 1.0;
-
-                b_p[offset++] = 0.0 + small;
-                b_p[offset++] = 0.0 + small;
-                b_p[offset++] = 0.0 + small;
-                b_p[offset++] = 0.0 + small;
-                b_p[offset++] = 0.0 + small;
-                b_p[offset++] = 0.0 + small;
-                b_p[offset++] = 0.0 + small;
-
-                b_p[offset++] = 2.0 + small;
-                b_p[offset++] = 2.0 + small;
-                b_p[offset++] = 2.0 + small;
-                b_p[offset++] = 2.0 + small;
-                b_p[offset++] = 2.0 + small;
-                b_p[offset++] = 2.0 + small;
-                b_p[offset++] = 2.0 + small;
-*/
-
-            }else if ( gpc_[my_state] == GeneralizedPauli_3_6 ) {
-
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 1.0;
-
-                b_p[offset++] = 0.0;
-
-            }else if ( gpc_[my_state] == GeneralizedPauli_4_10 || gpc_[my_state] == GeneralizedPauli_6_10 ) {
-
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 4.0;
-                //b_p[offset++] = 6.0;
-                b_p[offset++] = 2.0;
-                b_p[offset++] = 3.0;
-                b_p[offset++] = 3.0;
-                b_p[offset++] = 3.0;
-                b_p[offset++] = 3.0;
-                b_p[offset++] = 4.0;
-                b_p[offset++] = 4.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 8.0;
-                b_p[offset++] = 8.0;
-                b_p[offset++] = 8.0;
-                b_p[offset++] = 8.0;
-                b_p[offset++] = 8.0;
-                b_p[offset++] = 8.0;
-                b_p[offset++] = 8.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 11.0;
-                b_p[offset++] = 11.0;
-                b_p[offset++] = 11.0;
-                b_p[offset++] = 11.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 24.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 36.0;
-                b_p[offset++] = 42.0;
-                b_p[offset++] = 42.0;
-                b_p[offset++] = 42.0;
-                b_p[offset++] = 42.0;
-                b_p[offset++] = 42.0;
-            }else if ( gpc_[my_state] == GeneralizedPauli_5_10 ) {
-                // n(i) < n(i+1)
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 5.0;
-                // end n(i) < n(i+1)
-                b_p[offset++] = 2.0;
-                b_p[offset++] = 2.0;
-                b_p[offset++] = 2.0;
-                b_p[offset++] = 2.0;
-                b_p[offset++] = 2.0;
-                b_p[offset++] = 2.0;
-                //b_p[offset++] = 5.0;
-                b_p[offset++] = 5.0;
-                b_p[offset++] = 5.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 13.0;
-                b_p[offset++] = 13.0;
-                b_p[offset++] = 13.0;
-                b_p[offset++] = 13.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 15.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 20.0;
-                b_p[offset++] = 25.0;
-                b_p[offset++] = 25.0;
-                b_p[offset++] = 25.0;
-                b_p[offset++] = 25.0;
-                b_p[offset++] = 25.0;
-                b_p[offset++] = 25.0;
-                b_p[offset++] = 25.0;
-                b_p[offset++] = 25.0;
-                b_p[offset++] = 25.0;
-                b_p[offset++] = 25.0;
-                b_p[offset++] = 25.0;
-                b_p[offset++] = 25.0;
-                b_p[offset++] = 25.0;
-                b_p[offset++] = 25.0;
-                b_p[offset++] = 35.0;
-                b_p[offset++] = 35.0;
-                b_p[offset++] = 35.0;
-                b_p[offset++] = 35.0;
-                b_p[offset++] = 45.0;
-                b_p[offset++] = 45.0;
-                b_p[offset++] = 45.0;
-                b_p[offset++] = 45.0;
-            }else if ( gpc_[my_state] == GeneralizedPauli_3_10 || gpc_[my_state] == GeneralizedPauli_7_10 ) {
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 0.0;
-                //b_p[offset++] = 3.0;
-                b_p[offset++] = 1.0;
-                b_p[offset++] = 2.0;
-                b_p[offset++] = 3.0;
-                b_p[offset++] = 3.0;
-                b_p[offset++] = 3.0;
-                b_p[offset++] = 3.0;
-                b_p[offset++] = 4.0;
-                b_p[offset++] = 4.0;
-                b_p[offset++] = 4.0;
-                b_p[offset++] = 4.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 6.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 7.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 9.0;
-                b_p[offset++] = 11.0;
-                b_p[offset++] = 11.0;
-                b_p[offset++] = 11.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 12.0;
-                b_p[offset++] = 13.0;
-                b_p[offset++] = 13.0;
-                b_p[offset++] = 13.0;
-                b_p[offset++] = 13.0;
-                b_p[offset++] = 13.0;
-                b_p[offset++] = 19.0;
-                b_p[offset++] = 19.0;
-                b_p[offset++] = 19.0;
-                b_p[offset++] = 19.0;
-                b_p[offset++] = 19.0;
-                b_p[offset++] = 19.0;
-                b_p[offset++] = 19.0;
-                b_p[offset++] = 19.0;
-                b_p[offset++] = 19.0;
-                b_p[offset++] = 19.0;
-                b_p[offset++] = 19.0;
-                b_p[offset++] = 19.0;
-                b_p[offset++] = 19.0;
-                b_p[offset++] = 19.0;
-                b_p[offset++] = 19.0;
-                b_p[offset++] = 21.0;
-                b_p[offset++] = 21.0;
-            }
-
+    // T2bbb
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < trip_aba[h] + trip_aab[h]; i++) {
+        for (int j = 0; j < trip_aba[h] + trip_aab[h]; j++) {
+          b_p[offset + i * (trip_aab[h] + trip_aba[h]) + j] = 0.0;
         }
+      }
+      offset += (trip_aba[h] + trip_aab[h]) * (trip_aba[h] + trip_aab[h]);
     }
+    // T2aab
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < trip_aab[h]; i++) {
+        for (int j = 0; j < trip_aab[h]; j++) {
+          b_p[offset + i * trip_aab[h] + j] = 0.0;
+        }
+      }
+      offset += trip_aab[h] * trip_aab[h];
+    }
+    // T2bba
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < trip_aab[h]; i++) {
+        for (int j = 0; j < trip_aab[h]; j++) {
+          b_p[offset + i * trip_aab[h] + j] = 0.0;
+        }
+      }
+      offset += trip_aab[h] * trip_aab[h];
+    }
+  }
+  if (constrain_e3_) {
+    // E3aaa
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < trip_aba[h] + trip_aab[h]; i++) {
+        for (int j = 0; j < trip_aba[h] + trip_aab[h]; j++) {
+          b_p[offset + i * (trip_aab[h] + trip_aba[h]) + j] = 0.0;
+        }
+      }
+      offset += (trip_aba[h] + trip_aab[h]) * (trip_aba[h] + trip_aab[h]);
+    }
+    // E3bbb
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < trip_aba[h] + trip_aab[h]; i++) {
+        for (int j = 0; j < trip_aba[h] + trip_aab[h]; j++) {
+          b_p[offset + i * (trip_aab[h] + trip_aba[h]) + j] = 0.0;
+        }
+      }
+      offset += (trip_aba[h] + trip_aab[h]) * (trip_aba[h] + trip_aab[h]);
+    }
+    // E3aab
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < trip_aab[h]; i++) {
+        for (int j = 0; j < trip_aab[h]; j++) {
+          b_p[offset + i * trip_aab[h] + j] = 0.0;
+        }
+      }
+      offset += trip_aab[h] * trip_aab[h];
+    }
+    // E3bba
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < trip_aab[h]; i++) {
+        for (int j = 0; j < trip_aab[h]; j++) {
+          b_p[offset + i * trip_aab[h] + j] = 0.0;
+        }
+      }
+      offset += trip_aab[h] * trip_aab[h];
+    }
+  }
+  if (constrain_f3_) {
+    // F3aaa
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < trip_aba[h] + trip_aab[h]; i++) {
+        for (int j = 0; j < trip_aba[h] + trip_aab[h]; j++) {
+          b_p[offset + i * (trip_aab[h] + trip_aba[h]) + j] = 0.0;
+        }
+      }
+      offset += (trip_aba[h] + trip_aab[h]) * (trip_aba[h] + trip_aab[h]);
+    }
+    // F3bbb
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < trip_aba[h] + trip_aab[h]; i++) {
+        for (int j = 0; j < trip_aba[h] + trip_aab[h]; j++) {
+          b_p[offset + i * (trip_aab[h] + trip_aba[h]) + j] = 0.0;
+        }
+      }
+      offset += (trip_aba[h] + trip_aab[h]) * (trip_aba[h] + trip_aab[h]);
+    }
+    // F3aab
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < trip_aab[h]; i++) {
+        for (int j = 0; j < trip_aab[h]; j++) {
+          b_p[offset + i * trip_aab[h] + j] = 0.0;
+        }
+      }
+      offset += trip_aab[h] * trip_aab[h];
+    }
+    // F3bba
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < trip_aab[h]; i++) {
+        for (int j = 0; j < trip_aab[h]; j++) {
+          b_p[offset + i * trip_aab[h] + j] = 0.0;
+        }
+      }
+      offset += trip_aab[h] * trip_aab[h];
+    }
+  }
 
+  if (constrain_q3_) {
+    // Q3aaa
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < trip_aaa[h]; i++) {
+        for (int j = 0; j < trip_aaa[h]; j++) {
+          b_p[offset + i * trip_aaa[h] + j] = 0.0;
+        }
+      }
+      offset += trip_aaa[h] * trip_aaa[h];
+    }
+    // Q3bbb
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < trip_aaa[h]; i++) {
+        for (int j = 0; j < trip_aaa[h]; j++) {
+          b_p[offset + i * trip_aaa[h] + j] = 0.0;
+        }
+      }
+      offset += trip_aaa[h] * trip_aaa[h];
+    }
+    // Q3aab
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < trip_aab[h]; i++) {
+        for (int j = 0; j < trip_aab[h]; j++) {
+          b_p[offset + i * trip_aab[h] + j] = 0.0;
+        }
+      }
+      offset += trip_aab[h] * trip_aab[h];
+    }
+    // Q3bba
+    for (int h = 0; h < nirrep_; h++) {
+      for (int i = 0; i < trip_aab[h]; i++) {
+        for (int j = 0; j < trip_aab[h]; j++) {
+          b_p[offset + i * trip_aab[h] + j] = 0.0;
+        }
+      }
+      offset += trip_aab[h] * trip_aab[h];
+    }
+  }
+
+  if (constrain_d3_) {
+    if (constrain_sz_) {
+      // if (  nalpha_ - nrstc_ - nfrzc_ > 2 ) {
+      //  D3aaa -> D2aa
+      for (int h = 0; h < nirrep_; h++) {
+        for (int i = 0; i < gems_aa[h]; i++) {
+          for (int j = 0; j < gems_aa[h]; j++) {
+            b_p[offset + i * gems_aa[h] + j] = 0.0;
+          }
+        }
+        offset += gems_aa[h] * gems_aa[h];
+      }
+      //}
+      // if (  nbeta_ - nrstc_ - nfrzc_ > 2 ) {
+      // D3bbb -> D2bb
+      for (int h = 0; h < nirrep_; h++) {
+        for (int i = 0; i < gems_aa[h]; i++) {
+          for (int j = 0; j < gems_aa[h]; j++) {
+            b_p[offset + i * gems_aa[h] + j] = 0.0;
+          }
+        }
+        offset += gems_aa[h] * gems_aa[h];
+      }
+      //}
+      // if (  nalpha_ - nrstc_ - nfrzc_ > 1 ) {
+      // D3aab -> D2aa
+      for (int h = 0; h < nirrep_; h++) {
+        for (int i = 0; i < gems_aa[h]; i++) {
+          for (int j = 0; j < gems_aa[h]; j++) {
+            b_p[offset + i * gems_aa[h] + j] = 0.0;
+          }
+        }
+        offset += gems_aa[h] * gems_aa[h];
+      }
+      //}
+      // if (  nbeta_ - nrstc_ - nfrzc_ > 1 ) {
+      // D3bba -> D2bb
+      for (int h = 0; h < nirrep_; h++) {
+        for (int i = 0; i < gems_aa[h]; i++) {
+          for (int j = 0; j < gems_aa[h]; j++) {
+            b_p[offset + i * gems_aa[h] + j] = 0.0;
+          }
+        }
+        offset += gems_aa[h] * gems_aa[h];
+      }
+      //}
+      // if (  nalpha_ - nrstc_ - nfrzc_ > 1 ) {
+      // D3aab -> D2ab
+      for (int h = 0; h < nirrep_; h++) {
+        for (int i = 0; i < gems_ab[h]; i++) {
+          for (int j = 0; j < gems_ab[h]; j++) {
+            b_p[offset + i * gems_ab[h] + j] = 0.0;
+          }
+        }
+        offset += gems_ab[h] * gems_ab[h];
+      }
+      //}
+      // if (  nbeta_ - nrstc_ - nfrzc_ > 1 ) {
+      // D3bba -> D2ab
+      for (int h = 0; h < nirrep_; h++) {
+        for (int i = 0; i < gems_ab[h]; i++) {
+          for (int j = 0; j < gems_ab[h]; j++) {
+            b_p[offset + i * gems_ab[h] + j] = 0.0;
+          }
+        }
+        offset += gems_ab[h] * gems_ab[h];
+      }
+      //}
+    } else {
+      // D3aaa + D3aab -> D2aa
+      for (int h = 0; h < nirrep_; h++) {
+        for (int i = 0; i < gems_aa[h]; i++) {
+          for (int j = 0; j < gems_aa[h]; j++) {
+            b_p[offset + i * gems_aa[h] + j] = 0.0;
+          }
+        }
+        offset += gems_aa[h] * gems_aa[h];
+      }
+      // D3bbb + D3bba -> D2bb
+      for (int h = 0; h < nirrep_; h++) {
+        for (int i = 0; i < gems_aa[h]; i++) {
+          for (int j = 0; j < gems_aa[h]; j++) {
+            b_p[offset + i * gems_aa[h] + j] = 0.0;
+          }
+        }
+        offset += gems_aa[h] * gems_aa[h];
+      }
+      // D3abb + D3bba -> D2ab
+      for (int h = 0; h < nirrep_; h++) {
+        for (int i = 0; i < gems_ab[h]; i++) {
+          for (int j = 0; j < gems_ab[h]; j++) {
+            b_p[offset + i * gems_ab[h] + j] = 0.0;
+          }
+        }
+        offset += gems_ab[h] * gems_ab[h];
+      }
+    }
+    // additional spin constraints for singlets:
+    if (constrain_spin_ && nalpha_ == nbeta_) {
+      for (int h = 0; h < nirrep_; h++) {
+        offset += trip_aab[h] * trip_aab[h]; // D3aab = D3bba
+      }
+      for (int h = 0; h < nirrep_; h++) {
+        offset += trip_aaa[h] * trip_aaa[h]; // D3aab -> D3aaa
+        offset += trip_aaa[h] * trip_aaa[h]; // D3bba -> D3bbb
+      }
+    }
+  }
+  if (constrain_d4_) {
+    if (nalpha_ - nrstc_ - nfrzc_ > 3) {
+      // D4aaaa -> D3aaa
+      for (int h = 0; h < nirrep_; h++) {
+        offset += trip_aaa[h] * trip_aaa[h];
+      }
+    }
+    if (nalpha_ - nrstc_ - nfrzc_ > 2 && nbeta_ - nrstc_ - nfrzc_ > 0) {
+      // D4aaab -> D3aaa
+      for (int h = 0; h < nirrep_; h++) {
+        offset += trip_aaa[h] * trip_aaa[h];
+      }
+      // D4aaab -> D3aab
+      for (int h = 0; h < nirrep_; h++) {
+        offset += trip_aab[h] * trip_aab[h];
+      }
+    }
+    if (nalpha_ - nrstc_ - nfrzc_ > 1 && nbeta_ - nrstc_ - nfrzc_ > 1) {
+      // D4aabb -> D3aab
+      for (int h = 0; h < nirrep_; h++) {
+        offset += trip_aab[h] * trip_aab[h];
+      }
+      // D4aabb -> D3abb
+      for (int h = 0; h < nirrep_; h++) {
+        offset += trip_aab[h] * trip_aab[h];
+      }
+    }
+    if (nalpha_ - nrstc_ - nfrzc_ > 0 && nbeta_ - nrstc_ - nfrzc_ > 2) {
+      // D4abbb -> D3bbb
+      for (int h = 0; h < nirrep_; h++) {
+        offset += trip_aaa[h] * trip_aaa[h];
+      }
+      // D4abbb -> D3aab
+      for (int h = 0; h < nirrep_; h++) {
+        offset += trip_aab[h] * trip_aab[h];
+      }
+    }
+    if (nbeta_ - nrstc_ - nfrzc_ > 3) {
+      // D4bbbb -> D3bbb
+      for (int h = 0; h < nirrep_; h++) {
+        offset += trip_aaa[h] * trip_aaa[h];
+      }
+    }
+  }
+
+  // generalized pauli constraints
+
+  if (constrain_gpc_) {
+
+    // set constraints for every state to which gpc are applied
+    for (int my_state = 0; my_state < n_gpc_states_; my_state++) {
+
+      if (gpc_[my_state] == GeneralizedPauli_3_8 ||
+          gpc_[my_state] == GeneralizedPauli_5_8) {
+
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 3.0;
+
+        // b_p[offset++] = 0.0; // force one orbital occupation to zero
+
+        b_p[offset++] =
+            1.0; //  ## Extended Pauli inequality: lambda[1]+lambda[8]<=1 ##
+
+        b_p[offset++] = 1.0;
+        b_p[offset++] = 1.0;
+        b_p[offset++] = 1.0;
+        b_p[offset++] = 1.0;
+        b_p[offset++] = 1.0;
+        b_p[offset++] = 1.0;
+        b_p[offset++] = 1.0;
+        b_p[offset++] = 1.0;
+        b_p[offset++] = 1.0;
+        b_p[offset++] = 3.0;
+        b_p[offset++] = 3.0;
+        b_p[offset++] = 3.0;
+        b_p[offset++] = 3.0;
+        b_p[offset++] = 3.0;
+        b_p[offset++] = 3.0;
+        b_p[offset++] = 3.0;
+        b_p[offset++] = 5.0;
+        b_p[offset++] = 5.0;
+        b_p[offset++] = 5.0;
+        b_p[offset++] = 5.0;
+        b_p[offset++] = 5.0;
+        b_p[offset++] = 5.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+
+        /*
+                        b_p[offset++] = 2.0;
+                        b_p[offset++] = 2.0;
+                        b_p[offset++] = 2.0;
+                        b_p[offset++] = 2.0;
+
+                        b_p[offset++] = 1.0;
+                        b_p[offset++] = 1.0;
+                        b_p[offset++] = 1.0;
+                        b_p[offset++] = 1.0;
+                        b_p[offset++] = 1.0;
+                        b_p[offset++] = 1.0;
+
+                        b_p[offset++] = 1.0;
+
+                        b_p[offset++] = 0.0;
+                        b_p[offset++] = 0.0;
+                        b_p[offset++] = 0.0;
+
+                        b_p[offset++] = 2.0;
+                        b_p[offset++] = 2.0;
+                        b_p[offset++] = 2.0;
+                        b_p[offset++] = 2.0;
+
+                        b_p[offset++] = 0.0;
+                        b_p[offset++] = 0.0;
+                        b_p[offset++] = 0.0;
+                        b_p[offset++] = 0.0;
+
+                        b_p[offset++] = 1.0;
+                        b_p[offset++] = 1.0;
+                        b_p[offset++] = 1.0;
+                        b_p[offset++] = 1.0;
+                        b_p[offset++] = 1.0;
+
+                        b_p[offset++] = 0.0;
+                        b_p[offset++] = 0.0;
+                        b_p[offset++] = 0.0;
+                        b_p[offset++] = 0.0;
+        */
+      } else if (gpc_[my_state] == GeneralizedPauli_4_8) {
+
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 1.0;
+        b_p[offset++] = 0.0;
+        b_p[offset++] = 0.0;
+        b_p[offset++] = 0.0;
+        b_p[offset++] = 0.0;
+        b_p[offset++] = 0.0;
+        b_p[offset++] = 0.0;
+        b_p[offset++] = 0.0;
+        b_p[offset++] = 2.0;
+        b_p[offset++] = 2.0;
+        b_p[offset++] = 2.0;
+        b_p[offset++] = 2.0;
+        b_p[offset++] = 2.0;
+        b_p[offset++] = 2.0;
+        b_p[offset++] = 2.0;
+
+        /*
+                        //b_p[offset++] = 1.0;
+
+                        double small = 0.0;//r_convergence_;
+                        double scale = 1.0;
+
+                        b_p[offset++] = 0.0 + small;
+                        b_p[offset++] = 0.0 + small;
+                        b_p[offset++] = 0.0 + small;
+                        b_p[offset++] = 0.0 + small;
+                        b_p[offset++] = 0.0 + small;
+                        b_p[offset++] = 0.0 + small;
+                        b_p[offset++] = 0.0 + small;
+
+                        b_p[offset++] = 2.0 + small;
+                        b_p[offset++] = 2.0 + small;
+                        b_p[offset++] = 2.0 + small;
+                        b_p[offset++] = 2.0 + small;
+                        b_p[offset++] = 2.0 + small;
+                        b_p[offset++] = 2.0 + small;
+                        b_p[offset++] = 2.0 + small;
+        */
+
+      } else if (gpc_[my_state] == GeneralizedPauli_3_6) {
+
+        b_p[offset++] = 1.0;
+        b_p[offset++] = 1.0;
+        b_p[offset++] = 1.0;
+
+        b_p[offset++] = 0.0;
+
+      } else if (gpc_[my_state] == GeneralizedPauli_4_10 ||
+                 gpc_[my_state] == GeneralizedPauli_6_10) {
+
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 4.0;
+        // b_p[offset++] = 6.0;
+        b_p[offset++] = 2.0;
+        b_p[offset++] = 3.0;
+        b_p[offset++] = 3.0;
+        b_p[offset++] = 3.0;
+        b_p[offset++] = 3.0;
+        b_p[offset++] = 4.0;
+        b_p[offset++] = 4.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 8.0;
+        b_p[offset++] = 8.0;
+        b_p[offset++] = 8.0;
+        b_p[offset++] = 8.0;
+        b_p[offset++] = 8.0;
+        b_p[offset++] = 8.0;
+        b_p[offset++] = 8.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 11.0;
+        b_p[offset++] = 11.0;
+        b_p[offset++] = 11.0;
+        b_p[offset++] = 11.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 24.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 36.0;
+        b_p[offset++] = 42.0;
+        b_p[offset++] = 42.0;
+        b_p[offset++] = 42.0;
+        b_p[offset++] = 42.0;
+        b_p[offset++] = 42.0;
+      } else if (gpc_[my_state] == GeneralizedPauli_5_10) {
+        // n(i) < n(i+1)
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 5.0;
+        // end n(i) < n(i+1)
+        b_p[offset++] = 2.0;
+        b_p[offset++] = 2.0;
+        b_p[offset++] = 2.0;
+        b_p[offset++] = 2.0;
+        b_p[offset++] = 2.0;
+        b_p[offset++] = 2.0;
+        // b_p[offset++] = 5.0;
+        b_p[offset++] = 5.0;
+        b_p[offset++] = 5.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 13.0;
+        b_p[offset++] = 13.0;
+        b_p[offset++] = 13.0;
+        b_p[offset++] = 13.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 15.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 20.0;
+        b_p[offset++] = 25.0;
+        b_p[offset++] = 25.0;
+        b_p[offset++] = 25.0;
+        b_p[offset++] = 25.0;
+        b_p[offset++] = 25.0;
+        b_p[offset++] = 25.0;
+        b_p[offset++] = 25.0;
+        b_p[offset++] = 25.0;
+        b_p[offset++] = 25.0;
+        b_p[offset++] = 25.0;
+        b_p[offset++] = 25.0;
+        b_p[offset++] = 25.0;
+        b_p[offset++] = 25.0;
+        b_p[offset++] = 25.0;
+        b_p[offset++] = 35.0;
+        b_p[offset++] = 35.0;
+        b_p[offset++] = 35.0;
+        b_p[offset++] = 35.0;
+        b_p[offset++] = 45.0;
+        b_p[offset++] = 45.0;
+        b_p[offset++] = 45.0;
+        b_p[offset++] = 45.0;
+      } else if (gpc_[my_state] == GeneralizedPauli_3_10 ||
+                 gpc_[my_state] == GeneralizedPauli_7_10) {
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 0.0;
+        // b_p[offset++] = 3.0;
+        b_p[offset++] = 1.0;
+        b_p[offset++] = 2.0;
+        b_p[offset++] = 3.0;
+        b_p[offset++] = 3.0;
+        b_p[offset++] = 3.0;
+        b_p[offset++] = 3.0;
+        b_p[offset++] = 4.0;
+        b_p[offset++] = 4.0;
+        b_p[offset++] = 4.0;
+        b_p[offset++] = 4.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 6.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 7.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 9.0;
+        b_p[offset++] = 11.0;
+        b_p[offset++] = 11.0;
+        b_p[offset++] = 11.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 12.0;
+        b_p[offset++] = 13.0;
+        b_p[offset++] = 13.0;
+        b_p[offset++] = 13.0;
+        b_p[offset++] = 13.0;
+        b_p[offset++] = 13.0;
+        b_p[offset++] = 19.0;
+        b_p[offset++] = 19.0;
+        b_p[offset++] = 19.0;
+        b_p[offset++] = 19.0;
+        b_p[offset++] = 19.0;
+        b_p[offset++] = 19.0;
+        b_p[offset++] = 19.0;
+        b_p[offset++] = 19.0;
+        b_p[offset++] = 19.0;
+        b_p[offset++] = 19.0;
+        b_p[offset++] = 19.0;
+        b_p[offset++] = 19.0;
+        b_p[offset++] = 19.0;
+        b_p[offset++] = 19.0;
+        b_p[offset++] = 19.0;
+        b_p[offset++] = 21.0;
+        b_p[offset++] = 21.0;
+      }
+    }
+  }
 }
 
-///Build A dot u where u =[z,c]
-void v2RDMSolver::bpsdp_Au(double* A, double* u){
+/// Build A dot u where u =[z,c]
+void v2RDMSolver::bpsdp_Au(double *A, double *u) {
 
-    //A->zero();
-    memset((void*)A,'\0',n_dual_*sizeof(double));
+  // A->zero();
+  memset((void *)A, '\0', n_dual_ * sizeof(double));
 
-    offset = 0;
-    D2_constraints_Au(A,u);
+  offset = 0;
+  D2_constraints_Au(A, u);
 
-    if ( constrain_spin_ ) {
-        Spin_constraints_Au(A,u);
+  if (constrain_spin_) {
+    Spin_constraints_Au(A, u);
+  }
+
+  if (constrain_q2_) {
+    Q2_constraints_Au(A, u);
+  }
+
+  if (constrain_g2_) {
+    G2_constraints_Au(A, u);
+  }
+
+  if (constrain_t1_) {
+    T1_constraints_Au(A, u);
+  }
+
+  if (constrain_t2_) {
+    // T2_constraints_Au(A,u);
+    T2_constraints_Au_slow(A, u);
+  }
+
+  if (constrain_e3_) {
+    E3_constraints_Au(A, u);
+  }
+
+  if (constrain_f3_) {
+    F3_constraints_Au(A, u);
+  }
+
+  if (constrain_q3_) {
+    Q3_constraints_Au(A, u);
+  }
+
+  if (constrain_d3_) {
+    D3_constraints_Au(A, u);
+  }
+
+  if (constrain_d4_) {
+    D4_constraints_Au(A, u);
+  }
+
+  if (constrain_gpc_) {
+    for (int my_state = 0; my_state < n_gpc_states_; my_state++) {
+      Generalized_Pauli_constraints_Au(A, u, my_state);
     }
-
-    if ( constrain_q2_ ) {
-        Q2_constraints_Au(A,u);
-    }
-
-    if ( constrain_g2_ ) {
-        G2_constraints_Au(A,u);
-    }
-
-    if ( constrain_t1_ ) {
-        T1_constraints_Au(A,u);
-    }
-
-    if ( constrain_t2_ ) {
-        //T2_constraints_Au(A,u);
-        T2_constraints_Au_slow(A,u);
-    }
-
-    if ( constrain_e3_ ) {
-        E3_constraints_Au(A,u);
-    }
-
-    if ( constrain_f3_ ) {
-        F3_constraints_Au(A,u);
-    }
-
-    if ( constrain_q3_ ) {
-        Q3_constraints_Au(A,u);
-    }
-
-    if ( constrain_d3_ ) {
-        D3_constraints_Au(A,u);
-    }
-
-    if ( constrain_d4_ ) {
-        D4_constraints_Au(A,u);
-    }
-
-    if ( constrain_gpc_ ) {
-        for (int my_state = 0; my_state < n_gpc_states_; my_state++) {
-            Generalized_Pauli_constraints_Au(A,u,my_state);
-        }
-    }
+  }
 
 } // end Au
 
-///Build AT dot u where u =[z,c]
-//void v2RDMSolver::bpsdp_ATu(SharedVector A, SharedVector u)
-void v2RDMSolver::bpsdp_ATu(double * A, double * u){
+/// Build AT dot u where u =[z,c]
+// void v2RDMSolver::bpsdp_ATu(SharedVector A, SharedVector u)
+void v2RDMSolver::bpsdp_ATu(double *A, double *u) {
 
-    memset((void*)A,'\0',n_primal_*sizeof(double));
+  memset((void *)A, '\0', n_primal_ * sizeof(double));
 
-    offset = 0;
-    D2_constraints_ATu(A,u);
+  offset = 0;
+  D2_constraints_ATu(A, u);
 
-    if ( constrain_spin_ ) {
-        Spin_constraints_ATu(A,u);
+  if (constrain_spin_) {
+    Spin_constraints_ATu(A, u);
+  }
+
+  if (constrain_q2_) {
+    Q2_constraints_ATu(A, u);
+  }
+
+  if (constrain_g2_) {
+    G2_constraints_ATu(A, u);
+  }
+
+  if (constrain_t1_) {
+    T1_constraints_ATu(A, u);
+  }
+
+  if (constrain_t2_) {
+    // T2_constraints_ATu(A,u);
+    T2_constraints_ATu_slow(A, u);
+  }
+
+  if (constrain_e3_) {
+    E3_constraints_ATu(A, u);
+  }
+
+  if (constrain_f3_) {
+    F3_constraints_ATu(A, u);
+  }
+
+  if (constrain_q3_) {
+    Q3_constraints_ATu(A, u);
+  }
+
+  if (constrain_d3_) {
+    D3_constraints_ATu(A, u);
+  }
+
+  if (constrain_d4_) {
+    D4_constraints_ATu(A, u);
+  }
+
+  if (constrain_gpc_) {
+    for (int my_state = 0; my_state < n_gpc_states_; my_state++) {
+      Generalized_Pauli_constraints_ATu(A, u, my_state);
     }
+  }
 
-    if ( constrain_q2_ ) {
-        Q2_constraints_ATu(A,u);
-    }
-
-    if ( constrain_g2_ ) {
-        G2_constraints_ATu(A,u);
-    }
-
-    if ( constrain_t1_ ) {
-        T1_constraints_ATu(A,u);
-    }
-
-    if ( constrain_t2_ ) {
-        //T2_constraints_ATu(A,u);
-        T2_constraints_ATu_slow(A,u);
-    }
-
-    if ( constrain_e3_ ) {
-        E3_constraints_ATu(A,u);
-    }
-
-    if ( constrain_f3_ ) {
-        F3_constraints_ATu(A,u);
-    }
-
-    if ( constrain_q3_ ) {
-        Q3_constraints_ATu(A,u);
-    }
-
-    if ( constrain_d3_ ) {
-        D3_constraints_ATu(A,u);
-    }
-
-    if ( constrain_d4_ ) {
-        D4_constraints_ATu(A,u);
-    }
-
-    if ( constrain_gpc_ ) {
-        for (int my_state = 0; my_state < n_gpc_states_; my_state++) {
-            Generalized_Pauli_constraints_ATu(A,u,my_state);
-        }
-    }
-
-}//end ATu
+} // end ATu
 
 void v2RDMSolver::PackSpatialDensity() {
 
-    memset((void*)d2_act_spatial_sym_,'\0',d2_act_spatial_dim_*sizeof(double));
+  memset((void *)d2_act_spatial_sym_, '\0',
+         d2_act_spatial_dim_ * sizeof(double));
 
-    // D2 first
-    double * x_p = x->pointer();
-    // active active; active active
-    int offset = 0;
-    for (int h = 0; h < nirrep_; h++) {
-        for (int ij = 0; ij < gems_ab[h]; ij++) {
-            int i            = bas_ab_sym[h][ij][0];
-            int j            = bas_ab_sym[h][ij][1];
-            int hi           = symmetry[i];
-            int hj           = symmetry[j];
-            int ij_ab        = ibas_ab_sym[h][i][j];
-            int ji_ab        = ibas_ab_sym[h][j][i];
-            int ij_aa        = ibas_aa_sym[h][i][j];
+  // D2 first
+  double *x_p = x->pointer();
+  // active active; active active
+  int offset = 0;
+  for (int h = 0; h < nirrep_; h++) {
+    for (int ij = 0; ij < gems_ab[h]; ij++) {
+      int i = bas_ab_sym[h][ij][0];
+      int j = bas_ab_sym[h][ij][1];
+      int hi = symmetry[i];
+      int hj = symmetry[j];
+      int ij_ab = ibas_ab_sym[h][i][j];
+      int ji_ab = ibas_ab_sym[h][j][i];
+      int ij_aa = ibas_aa_sym[h][i][j];
 
-            for (int kl = 0; kl < gems_ab[h]; kl++) {
-                int k          = bas_ab_sym[h][kl][0];
-                int l          = bas_ab_sym[h][kl][1];
-                int hk         = symmetry[k];
-                int hl         = symmetry[l];
-                int kl_ab      = ibas_ab_sym[h][k][l];
-                int lk_ab      = ibas_ab_sym[h][l][k];
-                int kl_aa      = ibas_aa_sym[h][k][l];
+      for (int kl = 0; kl < gems_ab[h]; kl++) {
+        int k = bas_ab_sym[h][kl][0];
+        int l = bas_ab_sym[h][kl][1];
+        int hk = symmetry[k];
+        int hl = symmetry[l];
+        int kl_ab = ibas_ab_sym[h][k][l];
+        int lk_ab = ibas_ab_sym[h][l][k];
+        int kl_aa = ibas_aa_sym[h][k][l];
 
-                int hik = SymmetryPair(hi,hk);
+        int hik = SymmetryPair(hi, hk);
 
-                int ik = ibas_00_sym[hik][i][k];
-                int jl = ibas_00_sym[hik][j][l];
+        int ik = ibas_00_sym[hik][i][k];
+        int jl = ibas_00_sym[hik][j][l];
 
-                int hkj = SymmetryPair(hk,hj);
+        int hkj = SymmetryPair(hk, hj);
 
-                int kj_ab = ibas_ab_sym[hkj][k][j];
-                int il_ab = ibas_ab_sym[hkj][i][l];
+        int kj_ab = ibas_ab_sym[hkj][k][j];
+        int il_ab = ibas_ab_sym[hkj][i][l];
 
-                int jk_ab = ibas_ab_sym[hkj][j][k];
-                int li_ab = ibas_ab_sym[hkj][l][i];
+        int jk_ab = ibas_ab_sym[hkj][j][k];
+        int li_ab = ibas_ab_sym[hkj][l][i];
 
-                int kj_aa = ibas_aa_sym[hkj][k][j];
-                int il_aa = ibas_aa_sym[hkj][i][l];
+        int kj_aa = ibas_aa_sym[hkj][k][j];
+        int il_aa = ibas_aa_sym[hkj][i][l];
 
-                offset = 0;
-                for (int myh = 0; myh < hik; myh++) {
-                    offset += gems_00[myh] * ( gems_00[myh] + 1 ) / 2;
-//                    offset += gems_plus_core[myh] * ( gems_plus_core[myh] + 1 ) / 2;
-                }
-                int id = offset + INDEX(ik,jl);
-
-                double val = 0.0;
-
-                val += 0.5 * x_p[d2aboff[h]   + ij_ab*gems_ab[h]  + kl_ab];
-                val += 0.5 * x_p[d2aboff[hkj] + kj_ab*gems_ab[hkj]+ il_ab] * (1.0 - (double)(l==j));
-                val += 0.5 * x_p[d2aboff[hkj] + il_ab*gems_ab[hkj]+ kj_ab] * (1.0 - (double)(i==k));
-                val += 0.5 * x_p[d2aboff[h]   + kl_ab*gems_ab[h]  + ij_ab] * (1.0 - (double)(l==j))*(1.0-(double)(i==k));
-
-                val += 0.5 * x_p[d2aboff[h]   + ji_ab*gems_ab[h]  + lk_ab];
-                val += 0.5 * x_p[d2aboff[hkj] + jk_ab*gems_ab[hkj]+ li_ab] * (1.0 - (double)(l==j));
-                val += 0.5 * x_p[d2aboff[hkj] + li_ab*gems_ab[hkj]+ jk_ab] * (1.0 - (double)(i==k));
-                val += 0.5 * x_p[d2aboff[h]   + lk_ab*gems_ab[h]  + ji_ab] * (1.0 - (double)(l==j))*(1.0-(double)(i==k));
-
-                // aa / bb
-                if ( i != j && k != l ) {
-                    int sij = ( i < j ? 1 : -1 );
-                    int skl = ( k < l ? 1 : -1 );
-                    val += 0.5 * sij * skl * x_p[d2aaoff[h]   + ij_aa*gems_aa[h]  + kl_aa];
-                    val += 0.5 * sij * skl * x_p[d2aaoff[h]   + kl_aa*gems_aa[h]  + ij_aa] * (1.0 - (double)(l==j))*(1.0-(double)(i==k));
-                    val += 0.5 * sij * skl * x_p[d2bboff[h]   + ij_aa*gems_aa[h]  + kl_aa];
-                    val += 0.5 * sij * skl * x_p[d2bboff[h]   + kl_aa*gems_aa[h]  + ij_aa] * (1.0 - (double)(l==j))*(1.0-(double)(i==k));
-                }
-                if ( k != j && i != l ) {
-                    int skj = ( k < j ? 1 : -1 );
-                    int sil = ( i < l ? 1 : -1 );
-                    val += 0.5 * skj * sil * x_p[d2aaoff[hkj] + kj_aa*gems_aa[hkj]+ il_aa] * (1.0 - (double)(l==j));
-                    val += 0.5 * skj * sil * x_p[d2aaoff[hkj] + il_aa*gems_aa[hkj]+ kj_aa] * (1.0 - (double)(i==k));
-                    val += 0.5 * skj * sil * x_p[d2bboff[hkj] + kj_aa*gems_aa[hkj]+ il_aa] * (1.0 - (double)(l==j));
-                    val += 0.5 * skj * sil * x_p[d2bboff[hkj] + il_aa*gems_aa[hkj]+ kj_aa] * (1.0 - (double)(i==k));
-                }
-
-                // scale the off-diagonal elements
-                if ( ik != jl ) {
-                    val *= 2.0;
-                }
-                d2_act_spatial_sym_[id] = val;
-            }
+        offset = 0;
+        for (int myh = 0; myh < hik; myh++) {
+          offset += gems_00[myh] * (gems_00[myh] + 1) / 2;
+          //                    offset += gems_plus_core[myh] * (
+          //                    gems_plus_core[myh] + 1 ) / 2;
         }
-    }
+        int id = offset + INDEX(ik, jl);
 
-//gg -- changes relative to original code (see below)
-//gg    1) only active orbitals referenced 
-//gg    2) off-diagonal elements not scaled by 2
+        double val = 0.0;
 
-    offset = 0;
-    for (int h = 0; h < nirrep_; h++) {
-        for (int i = 0; i < amopi_[h]; i++) {
+        val += 0.5 * x_p[d2aboff[h] + ij_ab * gems_ab[h] + kl_ab];
+        val += 0.5 * x_p[d2aboff[hkj] + kj_ab * gems_ab[hkj] + il_ab] *
+               (1.0 - (double)(l == j));
+        val += 0.5 * x_p[d2aboff[hkj] + il_ab * gems_ab[hkj] + kj_ab] *
+               (1.0 - (double)(i == k));
+        val += 0.5 * x_p[d2aboff[h] + kl_ab * gems_ab[h] + ij_ab] *
+               (1.0 - (double)(l == j)) * (1.0 - (double)(i == k));
 
-            for (int j = i; j < amopi_[h]; j++) {
+        val += 0.5 * x_p[d2aboff[h] + ji_ab * gems_ab[h] + lk_ab];
+        val += 0.5 * x_p[d2aboff[hkj] + jk_ab * gems_ab[hkj] + li_ab] *
+               (1.0 - (double)(l == j));
+        val += 0.5 * x_p[d2aboff[hkj] + li_ab * gems_ab[hkj] + jk_ab] *
+               (1.0 - (double)(i == k));
+        val += 0.5 * x_p[d2aboff[h] + lk_ab * gems_ab[h] + ji_ab] *
+               (1.0 - (double)(l == j)) * (1.0 - (double)(i == k));
 
-                int id = offset + INDEX(i,j);
-
-                d1_act_spatial_sym_[id]  = x_p[d1aoff[h] + i * amopi_[h] + j];
-                d1_act_spatial_sym_[id] += x_p[d1boff[h] + i * amopi_[h] + j];
-
-            }
+        // aa / bb
+        if (i != j && k != l) {
+          int sij = (i < j ? 1 : -1);
+          int skl = (k < l ? 1 : -1);
+          val += 0.5 * sij * skl * x_p[d2aaoff[h] + ij_aa * gems_aa[h] + kl_aa];
+          val += 0.5 * sij * skl *
+                 x_p[d2aaoff[h] + kl_aa * gems_aa[h] + ij_aa] *
+                 (1.0 - (double)(l == j)) * (1.0 - (double)(i == k));
+          val += 0.5 * sij * skl * x_p[d2bboff[h] + ij_aa * gems_aa[h] + kl_aa];
+          val += 0.5 * sij * skl *
+                 x_p[d2bboff[h] + kl_aa * gems_aa[h] + ij_aa] *
+                 (1.0 - (double)(l == j)) * (1.0 - (double)(i == k));
         }
-        offset += amopi_[h] * ( amopi_[h] + 1 ) / 2;
-    }
+        if (k != j && i != l) {
+          int skj = (k < j ? 1 : -1);
+          int sil = (i < l ? 1 : -1);
+          val += 0.5 * skj * sil *
+                 x_p[d2aaoff[hkj] + kj_aa * gems_aa[hkj] + il_aa] *
+                 (1.0 - (double)(l == j));
+          val += 0.5 * skj * sil *
+                 x_p[d2aaoff[hkj] + il_aa * gems_aa[hkj] + kj_aa] *
+                 (1.0 - (double)(i == k));
+          val += 0.5 * skj * sil *
+                 x_p[d2bboff[hkj] + kj_aa * gems_aa[hkj] + il_aa] *
+                 (1.0 - (double)(l == j));
+          val += 0.5 * skj * sil *
+                 x_p[d2bboff[hkj] + il_aa * gems_aa[hkj] + kj_aa] *
+                 (1.0 - (double)(i == k));
+        }
 
+        // scale the off-diagonal elements
+        if (ik != jl) {
+          val *= 2.0;
+        }
+        d2_act_spatial_sym_[id] = val;
+      }
+    }
+  }
+
+  // gg -- changes relative to original code (see below)
+  // gg    1) only active orbitals referenced
+  // gg    2) off-diagonal elements not scaled by 2
+
+  offset = 0;
+  for (int h = 0; h < nirrep_; h++) {
+    for (int i = 0; i < amopi_[h]; i++) {
+
+      for (int j = i; j < amopi_[h]; j++) {
+
+        int id = offset + INDEX(i, j);
+
+        d1_act_spatial_sym_[id] = x_p[d1aoff[h] + i * amopi_[h] + j];
+        d1_act_spatial_sym_[id] += x_p[d1boff[h] + i * amopi_[h] + j];
+      }
+    }
+    offset += amopi_[h] * (amopi_[h] + 1) / 2;
+  }
 }
 
-void v2RDMSolver::RotateOrbitals(){
+#ifdef USING_PCMSolver
 
-    PackSpatialDensity();
+void v2RDMSolver::update_pcm() {
+  if (!PCM_enabled())
+    return;
+  if (!T_ || !V_)
+    return;
 
-    if ( orbopt_data_[8] > 0 ) {
-        outfile->Printf("\n");
-        outfile->Printf("        ==> Orbital Optimization <==\n");
-        outfile->Printf("\n");
+  // Get the python wavefunction object
+  py::object py_wfn = py::cast(this->shared_from_this());
+
+  // Get the python PCM object
+  py::object py_pcm = py_wfn.attr("get_PCM")();
+  if (py_pcm.is_none())
+    return;
+
+  // 1. Reconstruct current MO coefficients (Ca_curr) using Ca_ and
+  // orbopt_transformation_matrix_
+  SharedMatrix temp(new Matrix("MO_Rotation", nmopi_, nmopi_));
+  temp->zero();
+  for (int h = 0; h < nirrep_; h++) {
+    for (int i = 0; i < nmopi_[h]; i++) {
+      temp->pointer(h)[i][i] = 1.0;
+    }
+  }
+
+  for (int ieo = nfrzc_; ieo < nmo_ - nfrzv_; ieo++) {
+    int ifull = energy_to_pitzer_order[ieo];
+    int hi = symmetry_full[ifull];
+    int i = ifull - pitzer_offset_full[hi];
+
+    for (int jeo = nfrzc_; jeo < nmo_ - nfrzv_; jeo++) {
+      int jfull = energy_to_pitzer_order[jeo];
+      int hj = symmetry_full[jfull];
+      int j = jfull - pitzer_offset_full[hj];
+
+      if (hi != hj)
+        continue;
+
+      temp->pointer(hi)[i][j] =
+          orbopt_transformation_matrix_[(ieo - nfrzc_) *
+                                            (nmo_ - nfrzc_ - nfrzv_) +
+                                        (jeo - nfrzc_)];
+    }
+  }
+
+  SharedMatrix Ca_curr(new Matrix("Ca_curr", nsopi_, nmopi_));
+  Ca_curr->zero();
+  Ca_curr->gemm(false, true, 1.0, Ca_, temp, 0.0);
+
+  // 2. Build the total alpha and beta density matrices in the MO basis
+  SharedMatrix Da_MO(new Matrix("Da_MO", nmopi_, nmopi_));
+  SharedMatrix Db_MO(new Matrix("Db_MO", nmopi_, nmopi_));
+  Da_MO->zero();
+  Db_MO->zero();
+
+  double *x_p = x->pointer();
+
+  for (int h = 0; h < nirrep_; h++) {
+    // Core orbitals (frozen + restricted)
+    for (int i = 0; i < rstcpi_[h] + frzcpi_[h]; i++) {
+      Da_MO->pointer(h)[i][i] = 1.0;
+      Db_MO->pointer(h)[i][i] = 1.0;
+    }
+    // Active space orbitals
+    for (int i = 0; i < amopi_[h]; i++) {
+      int ii = i + rstcpi_[h] + frzcpi_[h];
+      for (int j = 0; j < amopi_[h]; j++) {
+        int jj = j + rstcpi_[h] + frzcpi_[h];
+        Da_MO->pointer(h)[ii][jj] = x_p[d1aoff[h] + i * amopi_[h] + j];
+        Db_MO->pointer(h)[ii][jj] = x_p[d1boff[h] + i * amopi_[h] + j];
+      }
+    }
+  }
+
+  // 3. Back-transform density matrices to the SO basis
+  SharedMatrix Da_SO(new Matrix("Da_SO", nsopi_, nsopi_));
+  SharedMatrix Db_SO(new Matrix("Db_SO", nsopi_, nsopi_));
+  Da_SO->zero();
+  Db_SO->zero();
+  Da_SO->back_transform(Da_MO, Ca_curr);
+  Db_SO->back_transform(Db_MO, Ca_curr);
+
+  // Form the total density matrix in the SO basis: D_SO = Da_SO + Db_SO
+  SharedMatrix D_SO(new Matrix("D_SO", nsopi_, nsopi_));
+  D_SO->zero();
+  D_SO->add(Da_SO);
+  D_SO->add(Db_SO);
+
+  // 4. Pass D_SO to PCMSolver and compute new PCM polarization energy and
+  // potential V_pcm
+  py::object calc_type = py::module_::import("psi4")
+                             .attr("core")
+                             .attr("PCM")
+                             .attr("CalcType")
+                             .attr("Total");
+  py::tuple pcm_terms = py_pcm.attr("compute_PCM_terms")(D_SO, calc_type);
+  E_pcm_ = pcm_terms[0].cast<double>();
+  SharedMatrix V_pcm = pcm_terms[1].cast<SharedMatrix>();
+
+  // Compute trace of density with PCM potential matrix: Tr(D_SO * V_pcm)
+  Tr_D_Vpcm_ = 0.0;
+  for (int h = 0; h < nirrep_; h++) {
+    int nso = nsopi_[h];
+    double **D_p = D_SO->pointer(h);
+    double **V_p = V_pcm->pointer(h);
+    for (int i = 0; i < nso; i++) {
+      for (int j = 0; j < nso; j++) {
+        Tr_D_Vpcm_ += D_p[i][j] * V_p[i][j];
+      }
+    }
+  }
+
+  // 5. Construct H = T + V + V_pcm in the SO basis and transform to MO basis
+  SharedMatrix H_SO(new Matrix("H_SO", nsopi_, nsopi_));
+  H_SO->zero();
+  H_SO->add(T_);
+  H_SO->add(V_);
+  H_SO->add(V_pcm);
+
+  SharedMatrix H_MO(new Matrix(H_SO));
+  H_MO->transform(Ca_curr);
+
+  // 6. Overwrite oei_full_sym_ with H_MO elements.
+  int offset = 0;
+  for (int h = 0; h < nirrep_; h++) {
+    for (long int i = 0; i < nmopi_[h] - frzvpi_[h]; i++) {
+      for (long int j = i; j < nmopi_[h] - frzvpi_[h]; j++) {
+        oei_full_sym_[offset + INDEX(i, j)] = H_MO->pointer(h)[i][j];
+      }
+    }
+    offset += (nmopi_[h] - frzvpi_[h]) * (nmopi_[h] - frzvpi_[h] + 1) / 2;
+  }
+
+  // 7. Update core repulsion energy efzc_ and the active one-electron integral
+  // elements of c->pointer()
+  FrozenCoreEnergy();
+}
+#endif
+
+void v2RDMSolver::RotateOrbitals() {
+
+  PackSpatialDensity();
+  orbopt_data_[18] = focas_df_c1_scratch_budget_mib(options_);
+
+  if (orbopt_data_[8] > 0) {
+    outfile->Printf("\n");
+    outfile->Printf("        ==> Orbital Optimization <==\n");
+    if (options_.get_int("ORBOPT_FOCAS_DF_C1_BLOCK_Q") <= 0) {
+      outfile->Printf("            FOCAS C1 DF scratch budget: %10.3f MiB\n",
+                      orbopt_data_[18]);
+    }
+    outfile->Printf("\n");
+  }
+
+  // int frzc = nfrzc_ + nrstc_;
+
+  // notes for truly frozen core:
+  //
+  // 1.  symmetry_energy_order should start with first restricted orbital
+  // 2.  orbopt_transformation_matrix_ should exclude frozen core
+
+  // notes for truly frozen virtuals:
+  // 1.  orbopt_transformation_matrix_ should exclude frozen virtuals
+  // 2.  oei_full_dim_, tei_full_dim_ should exclude frozen virtuals
+  // 3.  does symmetry_energy_order need to be the right length?
+
+  // gg -- added frzcpi_ to argument list
+  // OrbOpt(orbopt_transformation_matrix_,
+  //       oei_full_sym_,oei_full_dim_,tei_full_sym_,tei_full_dim_,
+  //       d1_act_spatial_sym_,d1_act_spatial_dim_,d2_plus_core_sym_,d2_plus_core_dim_,
+  //       symmetry_energy_order,frzcpi_,nrstc_,amo_,nrstv_,nirrep_,
+  //       orbopt_data_,orbopt_outfile_);
+
+  // GG call new C code
+
+  if (false) { // is_df_ ){
+
+    // call new C code for DF integrals
+
+    double dE_orbopt = 0.0e0;
+    double gnorm_orbopt = 1.0e3;
+    bool converged_orbopt = false;
+    int iter_orbopt;
+    orbopt_->optimize_orbitals(
+        d2_act_spatial_sym_, d1_act_spatial_sym_, tei_full_sym_, oei_full_sym_,
+        orbopt_transformation_matrix_, dE_orbopt, gnorm_orbopt, iter_orbopt);
+    orbopt_data_[10] = iter_orbopt;
+    orbopt_data_[11] = gnorm_orbopt;
+    orbopt_data_[12] = dE_orbopt;
+    orbopt_data_[13] = converged_orbopt;
+
+  } else {
+
+    // call old code for conventional 4-index integrals
+
+    OrbOpt(orbopt_transformation_matrix_, oei_full_sym_, oei_full_dim_,
+           tei_full_sym_, tei_full_dim_, d1_act_spatial_sym_,
+           d1_act_spatial_dim_, d2_act_spatial_sym_, d2_act_spatial_dim_,
+           symmetry_energy_order, nrstc_, amo_, nrstv_, nirrep_, orbopt_data_,
+           orbopt_outfile_, X_);
+  }
+
+  if (orbopt_data_[8] > 0) {
+
+    if (fabs(orbopt_data_[12]) < orbopt_data_[4] &&
+        fabs(orbopt_data_[11]) < orbopt_data_[3]) {
+      orbopt_converged_ = true;
+      orbopt_data_[13] = 1.0;
     }
 
-    //int frzc = nfrzc_ + nrstc_;
+    outfile->Printf("            Orbital Optimization %s in %3i iterations \n",
+                    orbopt_converged_ ? "converged" : "did not converge",
+                    (int)orbopt_data_[10]);
+    outfile->Printf("            Total energy change: %11.6le\n",
+                    orbopt_data_[12]);
+    outfile->Printf("            Final gradient norm: %11.6le\n",
+                    orbopt_data_[11]);
+    outfile->Printf("\n");
+  }
 
-    // notes for truly frozen core:
-    //
-    // 1.  symmetry_energy_order should start with first restricted orbital
-    // 2.  orbopt_transformation_matrix_ should exclude frozen core
-
-    // notes for truly frozen virtuals:
-    // 1.  orbopt_transformation_matrix_ should exclude frozen virtuals
-    // 2.  oei_full_dim_, tei_full_dim_ should exclude frozen virtuals
-    // 3.  does symmetry_energy_order need to be the right length?
-
-//gg -- added frzcpi_ to argument list
-    //OrbOpt(orbopt_transformation_matrix_,
-    //      oei_full_sym_,oei_full_dim_,tei_full_sym_,tei_full_dim_,
-    //      d1_act_spatial_sym_,d1_act_spatial_dim_,d2_plus_core_sym_,d2_plus_core_dim_,
-    //      symmetry_energy_order,frzcpi_,nrstc_,amo_,nrstv_,nirrep_,
-    //      orbopt_data_,orbopt_outfile_);
-
-// GG call new C code
-
-    if ( false ){ //is_df_ ){
-
-        // call new C code for DF integrals
-
-        double dE_orbopt = 0.0e0; double gnorm_orbopt = 1.0e3;bool converged_orbopt=false; int iter_orbopt;
-       orbopt_->optimize_orbitals(d2_act_spatial_sym_, d1_act_spatial_sym_, tei_full_sym_, oei_full_sym_, orbopt_transformation_matrix_,\
-                                  dE_orbopt, gnorm_orbopt,iter_orbopt);
-       orbopt_data_[10] = iter_orbopt;
-       orbopt_data_[11] = gnorm_orbopt;
-       orbopt_data_[12] = dE_orbopt;
-       orbopt_data_[13] = converged_orbopt;
- 
-    }
-    else {
-
-        // call old code for conventional 4-index integrals
-
-        OrbOpt(orbopt_transformation_matrix_,
-             oei_full_sym_,oei_full_dim_,tei_full_sym_,tei_full_dim_,
-             d1_act_spatial_sym_,d1_act_spatial_dim_,d2_act_spatial_sym_,d2_act_spatial_dim_,
-             symmetry_energy_order,nrstc_,amo_,nrstv_,nirrep_,
-             orbopt_data_,orbopt_outfile_,X_);
-
-    }
-
-    if ( orbopt_data_[8] > 0 ) {
-
-        if ( fabs(orbopt_data_[12]) < orbopt_data_[4] && fabs(orbopt_data_[11]) < orbopt_data_[3] ) {
-            orbopt_converged_ = true;
-            orbopt_data_[13] = 1.0;
-        }
-
-        outfile->Printf("            Orbital Optimization %s in %3i iterations \n",orbopt_converged_ ? "converged" : "did not converge",(int)orbopt_data_[10]);
-        outfile->Printf("            Total energy change: %11.6le\n",orbopt_data_[12]);
-        outfile->Printf("            Final gradient norm: %11.6le\n",orbopt_data_[11]);
-        outfile->Printf("\n");
-
-    }
-
-    RepackIntegrals();
+  RepackIntegrals();
 }
 
 void v2RDMSolver::determine_n_primal() {
 
-    n_primal_ = 0;
-    for ( int h = 0; h < nirrep_; h++) {
-        n_primal_ += gems_ab[h]*gems_ab[h]; // D2ab
+  n_primal_ = 0;
+  for (int h = 0; h < nirrep_; h++) {
+    n_primal_ += gems_ab[h] * gems_ab[h]; // D2ab
+  }
+  for (int h = 0; h < nirrep_; h++) {
+    n_primal_ += gems_aa[h] * gems_aa[h]; // D2aa
+  }
+  for (int h = 0; h < nirrep_; h++) {
+    n_primal_ += gems_aa[h] * gems_aa[h]; // D2bb
+  }
+  for (int h = 0; h < nirrep_; h++) {
+    n_primal_ += amopi_[h] * amopi_[h]; // D1a
+    n_primal_ += amopi_[h] * amopi_[h]; // D1b
+    n_primal_ += amopi_[h] * amopi_[h]; // Q1b
+    n_primal_ += amopi_[h] * amopi_[h]; // Q1a
+  }
+  if (constrain_spin_ && nalpha_ == nbeta_) {
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += gems_ab[h] * gems_ab[h]; // D200
     }
-    for ( int h = 0; h < nirrep_; h++) {
-        n_primal_ += gems_aa[h]*gems_aa[h]; // D2aa
+  } else if (constrain_spin_) {
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += 4 * gems_ab[h] * gems_ab[h]; // D200
     }
-    for ( int h = 0; h < nirrep_; h++) {
-        n_primal_ += gems_aa[h]*gems_aa[h]; // D2bb
+  }
+  if (constrain_q2_) {
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += gems_ab[h] * gems_ab[h]; // Q2ab
     }
-    for ( int h = 0; h < nirrep_; h++) {
-        n_primal_ += amopi_[h]*amopi_[h]; // D1a
-        n_primal_ += amopi_[h]*amopi_[h]; // D1b
-        n_primal_ += amopi_[h]*amopi_[h]; // Q1b
-        n_primal_ += amopi_[h]*amopi_[h]; // Q1a
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += gems_aa[h] * gems_aa[h]; // Q2aa
     }
-    if ( constrain_spin_ && nalpha_ == nbeta_ ) {
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += gems_ab[h] * gems_ab[h]; // D200
-        }
-    }else if ( constrain_spin_ ) {
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += 4 * gems_ab[h] * gems_ab[h]; // D200
-        }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += gems_aa[h] * gems_aa[h]; // Q2bb
     }
-    if ( constrain_q2_ ) {
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += gems_ab[h]*gems_ab[h]; // Q2ab
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += gems_aa[h]*gems_aa[h]; // Q2aa
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += gems_aa[h]*gems_aa[h]; // Q2bb
-        }
+  }
+  if (constrain_g2_) {
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += gems_ab[h] * gems_ab[h]; // G2ab
     }
-    if ( constrain_g2_ ) {
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += gems_ab[h]*gems_ab[h]; // G2ab
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += gems_ab[h]*gems_ab[h]; // G2ba
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += 2*gems_ab[h]*2*gems_ab[h]; // G2aa/bb
-        }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += gems_ab[h] * gems_ab[h]; // G2ba
     }
-    if ( constrain_t1_ ) {
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += trip_aaa[h]*trip_aaa[h]; // T1aaa
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += trip_aaa[h]*trip_aaa[h]; // T1bbb
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += trip_aab[h]*trip_aab[h]; // T1aab
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += trip_aab[h]*trip_aab[h]; // T1bba
-        }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += 2 * gems_ab[h] * 2 * gems_ab[h]; // G2aa/bb
     }
-    if ( constrain_t2_ ) {
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += (trip_aba[h]+trip_aab[h])*(trip_aab[h]+trip_aba[h]); // T2aaa
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += (trip_aba[h]+trip_aab[h])*(trip_aab[h]+trip_aba[h]); // T2bbb
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += trip_aab[h]*trip_aab[h]; // T2aab
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += trip_aab[h]*trip_aab[h]; // T2bba
-        }
+  }
+  if (constrain_t1_) {
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += trip_aaa[h] * trip_aaa[h]; // T1aaa
     }
-    if ( constrain_e3_ ) {
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += (trip_aba[h]+trip_aab[h])*(trip_aab[h]+trip_aba[h]); // E3aaa
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += (trip_aba[h]+trip_aab[h])*(trip_aab[h]+trip_aba[h]); // E3bbb
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += trip_aab[h]*trip_aab[h]; // E3aab
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += trip_aab[h]*trip_aab[h]; // E3bba
-        }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += trip_aaa[h] * trip_aaa[h]; // T1bbb
     }
-    if ( constrain_f3_ ) {
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += (trip_aba[h]+trip_aab[h])*(trip_aab[h]+trip_aba[h]); // F3aaa
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += (trip_aba[h]+trip_aab[h])*(trip_aab[h]+trip_aba[h]); // F3bbb
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += trip_aab[h]*trip_aab[h]; // F3aab
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += trip_aab[h]*trip_aab[h]; // F3bba
-        }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += trip_aab[h] * trip_aab[h]; // T1aab
     }
-    if ( constrain_q3_ ) {
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += trip_aaa[h] * trip_aaa[h]; // Q3aaa
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += trip_aaa[h] * trip_aaa[h]; // Q3bbb
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += trip_aab[h]*trip_aab[h]; // Q3aab
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += trip_aab[h]*trip_aab[h]; // Q3bba
-        }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += trip_aab[h] * trip_aab[h]; // T1bba
     }
-    if ( constrain_d3_ ) {
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += trip_aaa[h] * trip_aaa[h]; // D3aaa
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += trip_aaa[h] * trip_aaa[h]; // D3bbb
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += trip_aab[h]*trip_aab[h]; // D3aab
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += trip_aab[h]*trip_aab[h]; // D3bba
-        }
+  }
+  if (constrain_t2_) {
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ +=
+          (trip_aba[h] + trip_aab[h]) * (trip_aab[h] + trip_aba[h]); // T2aaa
     }
-    if ( constrain_d4_ ) {
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += quartet_aaaa[h] * quartet_aaaa[h]; // D4aaaa
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += quartet_aaab[h] * quartet_aaab[h]; // D4aaab
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += quartet_aabb[h] * quartet_aabb[h]; // D4aabb
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += quartet_aaab[h] * quartet_aaab[h]; // D4bbba
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_primal_ += quartet_aaaa[h] * quartet_aaaa[h]; // D4bbbb
-        }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ +=
+          (trip_aba[h] + trip_aab[h]) * (trip_aab[h] + trip_aba[h]); // T2bbb
     }
-    if ( constrain_gpc_ ) {
-        for (int my_state = 0; my_state < n_gpc_states_; my_state++) {
-            n_primal_ += n_gpc_[my_state];
-        }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += trip_aab[h] * trip_aab[h]; // T2aab
     }
-
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += trip_aab[h] * trip_aab[h]; // T2bba
+    }
+  }
+  if (constrain_e3_) {
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ +=
+          (trip_aba[h] + trip_aab[h]) * (trip_aab[h] + trip_aba[h]); // E3aaa
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ +=
+          (trip_aba[h] + trip_aab[h]) * (trip_aab[h] + trip_aba[h]); // E3bbb
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += trip_aab[h] * trip_aab[h]; // E3aab
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += trip_aab[h] * trip_aab[h]; // E3bba
+    }
+  }
+  if (constrain_f3_) {
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ +=
+          (trip_aba[h] + trip_aab[h]) * (trip_aab[h] + trip_aba[h]); // F3aaa
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ +=
+          (trip_aba[h] + trip_aab[h]) * (trip_aab[h] + trip_aba[h]); // F3bbb
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += trip_aab[h] * trip_aab[h]; // F3aab
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += trip_aab[h] * trip_aab[h]; // F3bba
+    }
+  }
+  if (constrain_q3_) {
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += trip_aaa[h] * trip_aaa[h]; // Q3aaa
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += trip_aaa[h] * trip_aaa[h]; // Q3bbb
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += trip_aab[h] * trip_aab[h]; // Q3aab
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += trip_aab[h] * trip_aab[h]; // Q3bba
+    }
+  }
+  if (constrain_d3_) {
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += trip_aaa[h] * trip_aaa[h]; // D3aaa
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += trip_aaa[h] * trip_aaa[h]; // D3bbb
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += trip_aab[h] * trip_aab[h]; // D3aab
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += trip_aab[h] * trip_aab[h]; // D3bba
+    }
+  }
+  if (constrain_d4_) {
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += quartet_aaaa[h] * quartet_aaaa[h]; // D4aaaa
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += quartet_aaab[h] * quartet_aaab[h]; // D4aaab
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += quartet_aabb[h] * quartet_aabb[h]; // D4aabb
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += quartet_aaab[h] * quartet_aaab[h]; // D4bbba
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_primal_ += quartet_aaaa[h] * quartet_aaaa[h]; // D4bbbb
+    }
+  }
+  if (constrain_gpc_) {
+    for (int my_state = 0; my_state < n_gpc_states_; my_state++) {
+      n_primal_ += n_gpc_[my_state];
+    }
+  }
 }
 
 void v2RDMSolver::determine_n_dual() {
 
-    n_dual_ = 0;
+  n_dual_ = 0;
 
-    if ( constrain_sz_ ) {
-        n_dual_ += 1;                   // Tr(D2ab)
-        n_dual_ += 1;                   // Tr(D2aa)
-        n_dual_ += 1;                   // Tr(D2bb)
-    }else{
-        n_dual_ += 1;                   // Tr(D2ab + D2aa + D2bb)
-    }
+  if (constrain_sz_) {
+    n_dual_ += 1; // Tr(D2ab)
+    n_dual_ += 1; // Tr(D2aa)
+    n_dual_ += 1; // Tr(D2bb)
+  } else {
+    n_dual_ += 1; // Tr(D2ab + D2aa + D2bb)
+  }
 
-    for ( int h = 0; h < nirrep_; h++) {
-        n_dual_ += gems_aa[h]*gems_aa[h]; // D2aa hermiticity
-        n_dual_ += gems_aa[h]*gems_aa[h]; // D2bb hermiticity
-        n_dual_ += gems_ab[h]*gems_ab[h]; // D2ab hermiticity
-    }
+  for (int h = 0; h < nirrep_; h++) {
+    n_dual_ += gems_aa[h] * gems_aa[h]; // D2aa hermiticity
+    n_dual_ += gems_aa[h] * gems_aa[h]; // D2bb hermiticity
+    n_dual_ += gems_ab[h] * gems_ab[h]; // D2ab hermiticity
+  }
 
-    for ( int h = 0; h < nirrep_; h++) {
-        n_dual_ += amopi_[h]*amopi_[h]; // D1a <-> Q1a
+  for (int h = 0; h < nirrep_; h++) {
+    n_dual_ += amopi_[h] * amopi_[h]; // D1a <-> Q1a
+  }
+  for (int h = 0; h < nirrep_; h++) {
+    n_dual_ += amopi_[h] * amopi_[h]; // D1b <-> Q1b
+  }
+  if (constrain_sz_) {
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += amopi_[h] * amopi_[h]; // contract D2ab        -> D1 a
     }
-    for ( int h = 0; h < nirrep_; h++) {
-        n_dual_ += amopi_[h]*amopi_[h]; // D1b <-> Q1b
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += amopi_[h] * amopi_[h]; // contract D2ab        -> D1 b
     }
-    if ( constrain_sz_ ) {
-        for ( int h = 0; h < nirrep_; h++) {
-            n_dual_ += amopi_[h]*amopi_[h]; // contract D2ab        -> D1 a
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_dual_ += amopi_[h]*amopi_[h]; // contract D2ab        -> D1 b
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_dual_ += amopi_[h]*amopi_[h]; // contract D2aa        -> D1 a
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_dual_ += amopi_[h]*amopi_[h]; // contract D2bb        -> D1 b
-        }
-    }else {
-        for ( int h = 0; h < nirrep_; h++) {
-            n_dual_ += amopi_[h]*amopi_[h]; // contract D2aa + D2ab        -> D1 a
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_dual_ += amopi_[h]*amopi_[h]; // contract D2bb + D2ab        -> D1 b
-        }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += amopi_[h] * amopi_[h]; // contract D2aa        -> D1 a
     }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += amopi_[h] * amopi_[h]; // contract D2bb        -> D1 b
+    }
+  } else {
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += amopi_[h] * amopi_[h]; // contract D2aa + D2ab        -> D1 a
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += amopi_[h] * amopi_[h]; // contract D2bb + D2ab        -> D1 b
+    }
+  }
 
-    if ( constrain_spin_ ) {
-        n_dual_ += 1;               // spin
-        // additional spin constraints for singlets:
-        if ( nalpha_ == nbeta_ ) {
-            for ( int h = 0; h < nirrep_; h++) {
-                n_dual_ += amopi_[h]*amopi_[h]; // D1a = D1b
-            }
-            for ( int h = 0; h < nirrep_; h++) {
-                n_dual_ += gems_aa[h]*gems_aa[h]; // D2aa = D2bb
-            }
-            for ( int h = 0; h < nirrep_; h++) {
-                n_dual_ += gems_aa[h]*gems_aa[h]; // D2aa[pq][rs] = 1/2(D2ab[pq][rs] - D2ab[pq][sr] - D2ab[qp][rs] + D2ab[qp][sr])
-            }
-            for ( int h = 0; h < nirrep_; h++) {
-                n_dual_ += gems_aa[h]*gems_aa[h]; // D2bb[pq][rs] = 1/2(D2ab[pq][rs] - D2ab[pq][sr] - D2ab[qp][rs] + D2ab[qp][sr])
-            }
-            for ( int h = 0; h < nirrep_; h++) {
-                n_dual_ += gems_ab[h]*gems_ab[h];  // D200[pq][rs] = 1/(2 sqrt(1+dpq)sqrt(1+drs))(D2ab[pq][rs] + D2ab[pq][sr] + D2ab[qp][rs] + D2ab[qp][sr])
-            }
-            for ( int h = 0; h < nirrep_; h++) {
-                n_dual_ += gems_ab[h]*gems_ab[h];  // D2ab[pq][rs] = D2ab[qp][sr]
-            }
-        }else { // nonsinglets
-            for ( int h = 0; h < nirrep_; h++) {
-                n_dual_ += 4*gems_ab[h]*gems_ab[h]; // D200_0, D210_0, D201_0, D211_0
-            }
-        }
-        // maximal spin constraints:
-        if ( constrain_g2_ ) {
-            n_dual_ += gems_ab[0];
-            n_dual_ += gems_ab[0];
-        }
+  if (constrain_spin_) {
+    n_dual_ += 1; // spin
+    // additional spin constraints for singlets:
+    if (nalpha_ == nbeta_) {
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += amopi_[h] * amopi_[h]; // D1a = D1b
+      }
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += gems_aa[h] * gems_aa[h]; // D2aa = D2bb
+      }
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += gems_aa[h] *
+                   gems_aa[h]; // D2aa[pq][rs] = 1/2(D2ab[pq][rs] - D2ab[pq][sr]
+                               // - D2ab[qp][rs] + D2ab[qp][sr])
+      }
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += gems_aa[h] *
+                   gems_aa[h]; // D2bb[pq][rs] = 1/2(D2ab[pq][rs] - D2ab[pq][sr]
+                               // - D2ab[qp][rs] + D2ab[qp][sr])
+      }
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += gems_ab[h] *
+                   gems_ab[h]; // D200[pq][rs] = 1/(2
+                               // sqrt(1+dpq)sqrt(1+drs))(D2ab[pq][rs] +
+                               // D2ab[pq][sr] + D2ab[qp][rs] + D2ab[qp][sr])
+      }
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += gems_ab[h] * gems_ab[h]; // D2ab[pq][rs] = D2ab[qp][sr]
+      }
+    } else { // nonsinglets
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ +=
+            4 * gems_ab[h] * gems_ab[h]; // D200_0, D210_0, D201_0, D211_0
+      }
     }
+    // maximal spin constraints:
+    if (constrain_g2_) {
+      n_dual_ += gems_ab[0];
+      n_dual_ += gems_ab[0];
+    }
+  }
 
-    if ( constrain_q2_ ) {
-        for ( int h = 0; h < nirrep_; h++) {
-            n_dual_ += gems_ab[h]*gems_ab[h]; // Q2ab
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_dual_ += gems_aa[h]*gems_aa[h]; // Q2aa
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_dual_ += gems_aa[h]*gems_aa[h]; // Q2bb
-        }
+  if (constrain_q2_) {
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += gems_ab[h] * gems_ab[h]; // Q2ab
     }
-    if ( constrain_g2_ ) {
-        for ( int h = 0; h < nirrep_; h++) {
-            n_dual_ += gems_ab[h]*gems_ab[h]; // G2ab
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_dual_ += gems_ab[h]*gems_ab[h]; // G2ba
-        }
-        for ( int h = 0; h < nirrep_; h++) {
-            n_dual_ += 2*gems_ab[h]*2*gems_ab[h]; // G2aa
-        }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += gems_aa[h] * gems_aa[h]; // Q2aa
     }
-    if ( constrain_t1_ ) {
-        for (int h = 0; h < nirrep_; h++) {
-            n_dual_ += trip_aaa[h]*trip_aaa[h]; // T1aaa
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            n_dual_ += trip_aaa[h]*trip_aaa[h]; // T1bbb
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            n_dual_ += trip_aab[h]*trip_aab[h]; // T1aab
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            n_dual_ += trip_aab[h]*trip_aab[h]; // T1bba
-        }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += gems_aa[h] * gems_aa[h]; // Q2bb
     }
-    if ( constrain_t2_ ) {
-        for (int h = 0; h < nirrep_; h++) {
-            n_dual_ += (trip_aab[h]+trip_aba[h])*(trip_aab[h]+trip_aba[h]); // T2aaa
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            n_dual_ += (trip_aab[h]+trip_aba[h])*(trip_aab[h]+trip_aba[h]); // T2bbb
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            n_dual_ += trip_aab[h]*trip_aab[h]; // T2aab
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            n_dual_ += trip_aab[h]*trip_aab[h]; // T2bba
-        }
+  }
+  if (constrain_g2_) {
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += gems_ab[h] * gems_ab[h]; // G2ab
     }
-    if ( constrain_e3_ ) {
-        for (int h = 0; h < nirrep_; h++) {
-            n_dual_ += (trip_aab[h]+trip_aba[h])*(trip_aab[h]+trip_aba[h]); // E3aaa
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            n_dual_ += (trip_aab[h]+trip_aba[h])*(trip_aab[h]+trip_aba[h]); // E3bbb
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            n_dual_ += trip_aab[h]*trip_aab[h]; // E3aab
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            n_dual_ += trip_aab[h]*trip_aab[h]; // E3bba
-        }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += gems_ab[h] * gems_ab[h]; // G2ba
     }
-    if ( constrain_f3_ ) {
-        for (int h = 0; h < nirrep_; h++) {
-            n_dual_ += (trip_aab[h]+trip_aba[h])*(trip_aab[h]+trip_aba[h]); // F3aaa
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            n_dual_ += (trip_aab[h]+trip_aba[h])*(trip_aab[h]+trip_aba[h]); // F3bbb
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            n_dual_ += trip_aab[h]*trip_aab[h]; // F3aab
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            n_dual_ += trip_aab[h]*trip_aab[h]; // F3bba
-        }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += 2 * gems_ab[h] * 2 * gems_ab[h]; // G2aa
     }
-    if ( constrain_q3_ ) {
-        for (int h = 0; h < nirrep_; h++) {
-            n_dual_ += trip_aaa[h]*trip_aaa[h]; // Q3aaa
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            n_dual_ += trip_aaa[h]*trip_aaa[h]; // Q3bbb
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            n_dual_ += trip_aab[h]*trip_aab[h]; // Q3aab
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            n_dual_ += trip_aab[h]*trip_aab[h]; // Q3bba
-        }
+  }
+  if (constrain_t1_) {
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += trip_aaa[h] * trip_aaa[h]; // T1aaa
     }
-    if ( constrain_d3_ ) {
-        if ( constrain_sz_ ) {
-            //if ( nalpha_ - nrstc_ - nfrzc_ > 2 ) {
-                for (int h = 0; h < nirrep_; h++) {
-                    n_dual_ += gems_aa[h]*gems_aa[h]; // D3aaa -> D2aa
-                }
-            //}
-            //if ( nbeta_ - nrstc_ - nfrzc_ > 2 ) {
-                for (int h = 0; h < nirrep_; h++) {
-                    n_dual_ += gems_aa[h]*gems_aa[h]; // D3bbb -> D2bb
-                }
-            //}
-            //if ( nalpha_ - nrstc_ - nfrzc_ > 2 ) {
-                for (int h = 0; h < nirrep_; h++) {
-                    n_dual_ += gems_aa[h]*gems_aa[h]; // D3aab -> D2aa
-                }
-            //}
-            //if ( nbeta_ - nrstc_ - nfrzc_ > 2 ) {
-            for (int h = 0; h < nirrep_; h++) {
-                n_dual_ += gems_aa[h]*gems_aa[h]; // D3bba -> D2bb
-            }
-            //}
-            //if ( nalpha_ - nrstc_ - nfrzc_ > 1 ) {
-                for (int h = 0; h < nirrep_; h++) {
-                    n_dual_ += gems_ab[h]*gems_ab[h]; // D3aab -> D2ab
-                }
-            //}
-            //if ( nbeta_ - nrstc_ - nfrzc_ > 1 ) {
-                for (int h = 0; h < nirrep_; h++) {
-                    n_dual_ += gems_ab[h]*gems_ab[h]; // D3bba -> D2ab
-                }
-            //}
-        }else {
-            for (int h = 0; h < nirrep_; h++) {
-                n_dual_ += gems_aa[h]*gems_aa[h]; // D3aaa + D3aab -> D2aa
-            }
-            for (int h = 0; h < nirrep_; h++) {
-                n_dual_ += gems_aa[h]*gems_aa[h]; // D3bbb + D3bba -> D2bb
-            }
-            for (int h = 0; h < nirrep_; h++) {
-                n_dual_ += gems_ab[h]*gems_ab[h]; // D3aab + D3bba -> D2ab
-            }
-        }
-        // additional spin constraints for singlets:
-        if ( constrain_spin_ && nalpha_ == nbeta_ ) {
-            for (int h = 0; h < nirrep_; h++) {
-                n_dual_ += trip_aab[h]*trip_aab[h]; // D3aab = D3bba
-            }
-            for (int h = 0; h < nirrep_; h++) {
-                n_dual_ += trip_aaa[h]*trip_aaa[h]; // D3aab -> D3aaa
-                n_dual_ += trip_aaa[h]*trip_aaa[h]; // D3bba -> D3bbb
-            }
-        }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += trip_aaa[h] * trip_aaa[h]; // T1bbb
     }
-    if ( constrain_d4_ ) {
-        if ( nalpha_ - nrstc_ - nfrzc_ > 3 ) {
-            for (int h = 0; h < nirrep_; h++) {
-                n_dual_ += trip_aaa[h]*trip_aaa[h]; // D4aaaa -> D3aaa
-            }
-        }
-        if ( nalpha_ - nrstc_ - nfrzc_ > 2 && nbeta_ - nrstc_ - nfrzc_ > 0 ) {
-            for (int h = 0; h < nirrep_; h++) {
-                n_dual_ += trip_aaa[h]*trip_aaa[h]; // D4aaab -> D3aaa
-            }
-            for (int h = 0; h < nirrep_; h++) {
-                n_dual_ += trip_aab[h]*trip_aab[h]; // D4aaab -> D3aab
-            }
-        }
-        if ( nalpha_ - nrstc_ - nfrzc_ > 1  && nbeta_ - nrstc_ - nfrzc_ > 1) {
-            for (int h = 0; h < nirrep_; h++) {
-                n_dual_ += trip_aab[h]*trip_aab[h]; // D4aabb -> D3aab
-            }
-            for (int h = 0; h < nirrep_; h++) {
-                n_dual_ += trip_aab[h]*trip_aab[h]; // D4aabb -> D3abb
-            }
-        }
-        if ( nalpha_ - nrstc_ - nfrzc_ > 1  && nbeta_ - nrstc_ - nfrzc_ > 1) {
-            for (int h = 0; h < nirrep_; h++) {
-                n_dual_ += trip_aab[h]*trip_aab[h]; // D4aabb -> D3aab
-            }
-            for (int h = 0; h < nirrep_; h++) {
-                n_dual_ += trip_aab[h]*trip_aab[h]; // D4aabb -> D3abb
-            }
-        }
-        if ( nalpha_ - nrstc_ - nfrzc_ > 0 && nbeta_ - nrstc_ - nfrzc_ > 2 ) {
-            for (int h = 0; h < nirrep_; h++) {
-                n_dual_ += trip_aab[h]*trip_aab[h]; // D4abbb -> D3abb
-            }
-            for (int h = 0; h < nirrep_; h++) {
-                n_dual_ += trip_aaa[h]*trip_aaa[h]; // D4abbb -> D3bbb
-            }
-        }
-        if ( nbeta_ - nrstc_ - nfrzc_ > 3 ) {
-            for (int h = 0; h < nirrep_; h++) {
-                n_dual_ += trip_aaa[h]*trip_aaa[h]; // D4bbbb -> D3bbb
-            }
-        }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += trip_aab[h] * trip_aab[h]; // T1aab
     }
-    if ( constrain_gpc_ ) {
-        for (int my_state = 0; my_state < n_gpc_states_; my_state++) {
-            n_dual_ += n_gpc_[my_state];
-        }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += trip_aab[h] * trip_aab[h]; // T1bba
     }
+  }
+  if (constrain_t2_) {
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ +=
+          (trip_aab[h] + trip_aba[h]) * (trip_aab[h] + trip_aba[h]); // T2aaa
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ +=
+          (trip_aab[h] + trip_aba[h]) * (trip_aab[h] + trip_aba[h]); // T2bbb
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += trip_aab[h] * trip_aab[h]; // T2aab
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += trip_aab[h] * trip_aab[h]; // T2bba
+    }
+  }
+  if (constrain_e3_) {
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ +=
+          (trip_aab[h] + trip_aba[h]) * (trip_aab[h] + trip_aba[h]); // E3aaa
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ +=
+          (trip_aab[h] + trip_aba[h]) * (trip_aab[h] + trip_aba[h]); // E3bbb
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += trip_aab[h] * trip_aab[h]; // E3aab
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += trip_aab[h] * trip_aab[h]; // E3bba
+    }
+  }
+  if (constrain_f3_) {
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ +=
+          (trip_aab[h] + trip_aba[h]) * (trip_aab[h] + trip_aba[h]); // F3aaa
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ +=
+          (trip_aab[h] + trip_aba[h]) * (trip_aab[h] + trip_aba[h]); // F3bbb
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += trip_aab[h] * trip_aab[h]; // F3aab
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += trip_aab[h] * trip_aab[h]; // F3bba
+    }
+  }
+  if (constrain_q3_) {
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += trip_aaa[h] * trip_aaa[h]; // Q3aaa
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += trip_aaa[h] * trip_aaa[h]; // Q3bbb
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += trip_aab[h] * trip_aab[h]; // Q3aab
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      n_dual_ += trip_aab[h] * trip_aab[h]; // Q3bba
+    }
+  }
+  if (constrain_d3_) {
+    if (constrain_sz_) {
+      // if ( nalpha_ - nrstc_ - nfrzc_ > 2 ) {
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += gems_aa[h] * gems_aa[h]; // D3aaa -> D2aa
+      }
+      //}
+      // if ( nbeta_ - nrstc_ - nfrzc_ > 2 ) {
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += gems_aa[h] * gems_aa[h]; // D3bbb -> D2bb
+      }
+      //}
+      // if ( nalpha_ - nrstc_ - nfrzc_ > 2 ) {
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += gems_aa[h] * gems_aa[h]; // D3aab -> D2aa
+      }
+      //}
+      // if ( nbeta_ - nrstc_ - nfrzc_ > 2 ) {
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += gems_aa[h] * gems_aa[h]; // D3bba -> D2bb
+      }
+      //}
+      // if ( nalpha_ - nrstc_ - nfrzc_ > 1 ) {
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += gems_ab[h] * gems_ab[h]; // D3aab -> D2ab
+      }
+      //}
+      // if ( nbeta_ - nrstc_ - nfrzc_ > 1 ) {
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += gems_ab[h] * gems_ab[h]; // D3bba -> D2ab
+      }
+      //}
+    } else {
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += gems_aa[h] * gems_aa[h]; // D3aaa + D3aab -> D2aa
+      }
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += gems_aa[h] * gems_aa[h]; // D3bbb + D3bba -> D2bb
+      }
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += gems_ab[h] * gems_ab[h]; // D3aab + D3bba -> D2ab
+      }
+    }
+    // additional spin constraints for singlets:
+    if (constrain_spin_ && nalpha_ == nbeta_) {
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += trip_aab[h] * trip_aab[h]; // D3aab = D3bba
+      }
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += trip_aaa[h] * trip_aaa[h]; // D3aab -> D3aaa
+        n_dual_ += trip_aaa[h] * trip_aaa[h]; // D3bba -> D3bbb
+      }
+    }
+  }
+  if (constrain_d4_) {
+    if (nalpha_ - nrstc_ - nfrzc_ > 3) {
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += trip_aaa[h] * trip_aaa[h]; // D4aaaa -> D3aaa
+      }
+    }
+    if (nalpha_ - nrstc_ - nfrzc_ > 2 && nbeta_ - nrstc_ - nfrzc_ > 0) {
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += trip_aaa[h] * trip_aaa[h]; // D4aaab -> D3aaa
+      }
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += trip_aab[h] * trip_aab[h]; // D4aaab -> D3aab
+      }
+    }
+    if (nalpha_ - nrstc_ - nfrzc_ > 1 && nbeta_ - nrstc_ - nfrzc_ > 1) {
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += trip_aab[h] * trip_aab[h]; // D4aabb -> D3aab
+      }
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += trip_aab[h] * trip_aab[h]; // D4aabb -> D3abb
+      }
+    }
+    if (nalpha_ - nrstc_ - nfrzc_ > 1 && nbeta_ - nrstc_ - nfrzc_ > 1) {
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += trip_aab[h] * trip_aab[h]; // D4aabb -> D3aab
+      }
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += trip_aab[h] * trip_aab[h]; // D4aabb -> D3abb
+      }
+    }
+    if (nalpha_ - nrstc_ - nfrzc_ > 0 && nbeta_ - nrstc_ - nfrzc_ > 2) {
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += trip_aab[h] * trip_aab[h]; // D4abbb -> D3abb
+      }
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += trip_aaa[h] * trip_aaa[h]; // D4abbb -> D3bbb
+      }
+    }
+    if (nbeta_ - nrstc_ - nfrzc_ > 3) {
+      for (int h = 0; h < nirrep_; h++) {
+        n_dual_ += trip_aaa[h] * trip_aaa[h]; // D4bbbb -> D3bbb
+      }
+    }
+  }
+  if (constrain_gpc_) {
+    for (int my_state = 0; my_state < n_gpc_states_; my_state++) {
+      n_dual_ += n_gpc_[my_state];
+    }
+  }
 }
 
 void v2RDMSolver::set_primal_offsets() {
 
-    offset = 0;
+  offset = 0;
 
-    d2aboff = (int*)malloc(nirrep_*sizeof(int));
-    d2aaoff = (int*)malloc(nirrep_*sizeof(int));
-    d2bboff = (int*)malloc(nirrep_*sizeof(int));
-    d200off = (int*)malloc(nirrep_*sizeof(int));
+  d2aboff = (int *)malloc(nirrep_ * sizeof(int));
+  d2aaoff = (int *)malloc(nirrep_ * sizeof(int));
+  d2bboff = (int *)malloc(nirrep_ * sizeof(int));
+  d200off = (int *)malloc(nirrep_ * sizeof(int));
+  for (int h = 0; h < nirrep_; h++) {
+    d2aboff[h] = offset;
+    offset += gems_ab[h] * gems_ab[h];
+    dimensions_.push_back(gems_ab[h]);
+    rank_.push_back(gems_ab[h]);
+  }
+  for (int h = 0; h < nirrep_; h++) {
+    d2aaoff[h] = offset;
+    offset += gems_aa[h] * gems_aa[h];
+    dimensions_.push_back(gems_aa[h]);
+    rank_.push_back(gems_aa[h]);
+  }
+  for (int h = 0; h < nirrep_; h++) {
+    d2bboff[h] = offset;
+    offset += gems_aa[h] * gems_aa[h];
+    dimensions_.push_back(gems_aa[h]);
+    rank_.push_back(gems_aa[h]);
+  }
+  if (constrain_spin_ && nalpha_ == nbeta_) {
     for (int h = 0; h < nirrep_; h++) {
-        d2aboff[h] = offset; 
-        offset += gems_ab[h]*gems_ab[h];
-        dimensions_.push_back(gems_ab[h]);
-        rank_.push_back(gems_ab[h]);
+      d200off[h] = offset;
+      offset += gems_ab[h] * gems_ab[h];
+      dimensions_.push_back(gems_ab[h]);
+      rank_.push_back(gems_ab[h]);
     }
+  } else if (constrain_spin_) {
     for (int h = 0; h < nirrep_; h++) {
-        d2aaoff[h] = offset;    
-        offset += gems_aa[h]*gems_aa[h];
-        dimensions_.push_back(gems_aa[h]);
-        rank_.push_back(gems_aa[h]);
+      d200off[h] = offset;
+      offset += 4 * gems_ab[h] * gems_ab[h];
+      dimensions_.push_back(2 * gems_ab[h]);
+      rank_.push_back(2 * gems_ab[h]);
     }
-    for (int h = 0; h < nirrep_; h++) {
-        d2bboff[h] = offset; 
-        offset += gems_aa[h]*gems_aa[h];
-        dimensions_.push_back(gems_aa[h]);
-        rank_.push_back(gems_aa[h]);
-    }
-    if ( constrain_spin_ && nalpha_ == nbeta_ ) {
-        for (int h = 0; h < nirrep_; h++) {
-            d200off[h] = offset; 
-            offset += gems_ab[h]*gems_ab[h];
-            dimensions_.push_back(gems_ab[h]);
-            rank_.push_back(gems_ab[h]);
-        }
-    } else if ( constrain_spin_ ) {
-        for (int h = 0; h < nirrep_; h++) {
-            d200off[h] = offset; 
-            offset += 4*gems_ab[h]*gems_ab[h];
-            dimensions_.push_back(2*gems_ab[h]);
-            rank_.push_back(2*gems_ab[h]);
-        }
-    }
+  }
 
-    d1aoff = (int*)malloc(nirrep_*sizeof(int));
-    d1boff = (int*)malloc(nirrep_*sizeof(int));
-    q1aoff = (int*)malloc(nirrep_*sizeof(int));
-    q1boff = (int*)malloc(nirrep_*sizeof(int));
+  d1aoff = (int *)malloc(nirrep_ * sizeof(int));
+  d1boff = (int *)malloc(nirrep_ * sizeof(int));
+  q1aoff = (int *)malloc(nirrep_ * sizeof(int));
+  q1boff = (int *)malloc(nirrep_ * sizeof(int));
+  for (int h = 0; h < nirrep_; h++) {
+    d1aoff[h] = offset;
+    offset += amopi_[h] * amopi_[h];
+    dimensions_.push_back(amopi_[h]);
+    rank_.push_back(amopi_[h]);
+  }
+  for (int h = 0; h < nirrep_; h++) {
+    d1boff[h] = offset;
+    offset += amopi_[h] * amopi_[h];
+    dimensions_.push_back(amopi_[h]);
+    rank_.push_back(amopi_[h]);
+  }
+  for (int h = 0; h < nirrep_; h++) {
+    q1aoff[h] = offset;
+    offset += amopi_[h] * amopi_[h];
+    dimensions_.push_back(amopi_[h]);
+    rank_.push_back(amopi_[h]);
+  }
+  for (int h = 0; h < nirrep_; h++) {
+    q1boff[h] = offset;
+    offset += amopi_[h] * amopi_[h];
+    dimensions_.push_back(amopi_[h]);
+    rank_.push_back(amopi_[h]);
+  }
+
+  if (constrain_q2_) {
+    q2aboff = (int *)malloc(nirrep_ * sizeof(int));
+    q2aaoff = (int *)malloc(nirrep_ * sizeof(int));
+    q2bboff = (int *)malloc(nirrep_ * sizeof(int));
     for (int h = 0; h < nirrep_; h++) {
-        d1aoff[h] = offset; 
-        offset += amopi_[h]*amopi_[h];
-        dimensions_.push_back(amopi_[h]);
-        rank_.push_back(amopi_[h]);
+      q2aboff[h] = offset;
+      offset += gems_ab[h] * gems_ab[h];
+      dimensions_.push_back(gems_ab[h]);
+      rank_.push_back(gems_ab[h]);
     }
     for (int h = 0; h < nirrep_; h++) {
-        d1boff[h] = offset; 
-        offset += amopi_[h]*amopi_[h];
-        dimensions_.push_back(amopi_[h]);
-        rank_.push_back(amopi_[h]);
+      q2aaoff[h] = offset;
+      offset += gems_aa[h] * gems_aa[h];
+      dimensions_.push_back(gems_aa[h]);
+      rank_.push_back(gems_aa[h]);
     }
     for (int h = 0; h < nirrep_; h++) {
-        q1aoff[h] = offset; 
-        offset += amopi_[h]*amopi_[h];
-        dimensions_.push_back(amopi_[h]);
-        rank_.push_back(amopi_[h]);
+      q2bboff[h] = offset;
+      offset += gems_aa[h] * gems_aa[h];
+      dimensions_.push_back(gems_aa[h]);
+      rank_.push_back(gems_aa[h]);
+    }
+  }
+
+  if (constrain_g2_) {
+    g2aboff = (int *)malloc(nirrep_ * sizeof(int));
+    g2baoff = (int *)malloc(nirrep_ * sizeof(int));
+    g2aaoff = (int *)malloc(nirrep_ * sizeof(int));
+    for (int h = 0; h < nirrep_; h++) {
+      g2aboff[h] = offset;
+      offset += gems_ab[h] * gems_ab[h];
+      dimensions_.push_back(gems_ab[h]);
+      rank_.push_back(gems_ab[h]);
     }
     for (int h = 0; h < nirrep_; h++) {
-        q1boff[h] = offset; 
-        offset += amopi_[h]*amopi_[h];
-        dimensions_.push_back(amopi_[h]);
-        rank_.push_back(amopi_[h]);
+      g2baoff[h] = offset;
+      offset += gems_ab[h] * gems_ab[h];
+      dimensions_.push_back(gems_ab[h]);
+      rank_.push_back(gems_ab[h]);
     }
+    for (int h = 0; h < nirrep_; h++) {
+      g2aaoff[h] = offset;
+      offset += 2 * gems_ab[h] * 2 * gems_ab[h];
+      dimensions_.push_back(2 * gems_ab[h]);
+      rank_.push_back(2 * gems_ab[h]);
+    }
+  }
 
-    if ( constrain_q2_ ) {
-        q2aboff = (int*)malloc(nirrep_*sizeof(int));
-        q2aaoff = (int*)malloc(nirrep_*sizeof(int));
-        q2bboff = (int*)malloc(nirrep_*sizeof(int));
-        for (int h = 0; h < nirrep_; h++) {
-            q2aboff[h] = offset; 
-            offset += gems_ab[h]*gems_ab[h];
-            dimensions_.push_back(gems_ab[h]);
-            rank_.push_back(gems_ab[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            q2aaoff[h] = offset; 
-            offset += gems_aa[h]*gems_aa[h];
-            dimensions_.push_back(gems_aa[h]);
-            rank_.push_back(gems_aa[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            q2bboff[h] = offset; 
-            offset += gems_aa[h]*gems_aa[h];
-            dimensions_.push_back(gems_aa[h]);
-            rank_.push_back(gems_aa[h]);
-        }
+  if (constrain_t1_) {
+    t1aaboff = (int *)malloc(nirrep_ * sizeof(int));
+    t1bbaoff = (int *)malloc(nirrep_ * sizeof(int));
+    t1aaaoff = (int *)malloc(nirrep_ * sizeof(int));
+    t1bbboff = (int *)malloc(nirrep_ * sizeof(int));
+    for (int h = 0; h < nirrep_; h++) {
+      t1aaaoff[h] = offset;
+      offset += trip_aaa[h] * trip_aaa[h]; // T1aaa
+      dimensions_.push_back(trip_aaa[h]);
+      rank_.push_back(trip_aaa[h]);
     }
+    for (int h = 0; h < nirrep_; h++) {
+      t1bbboff[h] = offset;
+      offset += trip_aaa[h] * trip_aaa[h]; // T1bbb
+      dimensions_.push_back(trip_aaa[h]);
+      rank_.push_back(trip_aaa[h]);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      t1aaboff[h] = offset;
+      offset += trip_aab[h] * trip_aab[h]; // T1aab
+      dimensions_.push_back(trip_aab[h]);
+      rank_.push_back(trip_aab[h]);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      t1bbaoff[h] = offset;
+      offset += trip_aab[h] * trip_aab[h]; // T1bba
+      dimensions_.push_back(trip_aab[h]);
+      rank_.push_back(trip_aab[h]);
+    }
+  }
 
-    if ( constrain_g2_ ) {
-        g2aboff = (int*)malloc(nirrep_*sizeof(int));
-        g2baoff = (int*)malloc(nirrep_*sizeof(int));
-        g2aaoff = (int*)malloc(nirrep_*sizeof(int));
-        for (int h = 0; h < nirrep_; h++) {
-            g2aboff[h] = offset; 
-            offset += gems_ab[h]*gems_ab[h];
-            dimensions_.push_back(gems_ab[h]);
-            rank_.push_back(gems_ab[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            g2baoff[h] = offset; 
-            offset += gems_ab[h]*gems_ab[h];
-            dimensions_.push_back(gems_ab[h]);
-            rank_.push_back(gems_ab[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            g2aaoff[h] = offset; 
-            offset += 2*gems_ab[h]*2*gems_ab[h];
-            dimensions_.push_back(2*gems_ab[h]);
-            rank_.push_back(2*gems_ab[h]);
-        }
+  if (constrain_t2_) {
+    t2aaboff = (int *)malloc(nirrep_ * sizeof(int));
+    t2bbaoff = (int *)malloc(nirrep_ * sizeof(int));
+    t2aaaoff = (int *)malloc(nirrep_ * sizeof(int));
+    t2bbboff = (int *)malloc(nirrep_ * sizeof(int));
+    for (int h = 0; h < nirrep_; h++) {
+      t2aaaoff[h] = offset;
+      offset +=
+          (trip_aab[h] + trip_aba[h]) * (trip_aab[h] + trip_aba[h]); // T2aaa
+      dimensions_.push_back(trip_aab[h] + trip_aba[h]);
+      rank_.push_back(trip_aab[h] + trip_aba[h]);
     }
+    for (int h = 0; h < nirrep_; h++) {
+      t2bbboff[h] = offset;
+      offset +=
+          (trip_aab[h] + trip_aba[h]) * (trip_aab[h] + trip_aba[h]); // T2bbb
+      dimensions_.push_back(trip_aab[h] + trip_aba[h]);
+      rank_.push_back(trip_aab[h] + trip_aba[h]);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      t2aaboff[h] = offset;
+      offset += trip_aab[h] * trip_aab[h]; // T2aab
+      dimensions_.push_back(trip_aab[h]);
+      rank_.push_back(trip_aab[h]);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      t2bbaoff[h] = offset;
+      offset += trip_aab[h] * trip_aab[h]; // T2bba
+      dimensions_.push_back(trip_aab[h]);
+      rank_.push_back(trip_aab[h]);
+    }
+  }
+  if (constrain_e3_) {
+    e3aaboff = (int *)malloc(nirrep_ * sizeof(int));
+    e3bbaoff = (int *)malloc(nirrep_ * sizeof(int));
+    e3aaaoff = (int *)malloc(nirrep_ * sizeof(int));
+    e3bbboff = (int *)malloc(nirrep_ * sizeof(int));
+    for (int h = 0; h < nirrep_; h++) {
+      e3aaaoff[h] = offset;
+      offset +=
+          (trip_aab[h] + trip_aba[h]) * (trip_aab[h] + trip_aba[h]); // E3aaa
+      dimensions_.push_back(trip_aab[h] + trip_aba[h]);
+      rank_.push_back(trip_aab[h] + trip_aba[h]);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      e3bbboff[h] = offset;
+      offset +=
+          (trip_aab[h] + trip_aba[h]) * (trip_aab[h] + trip_aba[h]); // E3bbb
+      dimensions_.push_back(trip_aab[h] + trip_aba[h]);
+      rank_.push_back(trip_aab[h] + trip_aba[h]);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      e3aaboff[h] = offset;
+      offset += trip_aab[h] * trip_aab[h]; // E3aab
+      dimensions_.push_back(trip_aab[h]);
+      rank_.push_back(trip_aab[h]);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      e3bbaoff[h] = offset;
+      offset += trip_aab[h] * trip_aab[h]; // E3bba
+      dimensions_.push_back(trip_aab[h]);
+      rank_.push_back(trip_aab[h]);
+    }
+  }
+  if (constrain_f3_) {
+    f3aaboff = (int *)malloc(nirrep_ * sizeof(int));
+    f3bbaoff = (int *)malloc(nirrep_ * sizeof(int));
+    f3aaaoff = (int *)malloc(nirrep_ * sizeof(int));
+    f3bbboff = (int *)malloc(nirrep_ * sizeof(int));
+    for (int h = 0; h < nirrep_; h++) {
+      f3aaaoff[h] = offset;
+      offset +=
+          (trip_aab[h] + trip_aba[h]) * (trip_aab[h] + trip_aba[h]); // F3aaa
+      dimensions_.push_back(trip_aab[h] + trip_aba[h]);
+      rank_.push_back(trip_aab[h] + trip_aba[h]);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      f3bbboff[h] = offset;
+      offset +=
+          (trip_aab[h] + trip_aba[h]) * (trip_aab[h] + trip_aba[h]); // F3bbb
+      dimensions_.push_back(trip_aab[h] + trip_aba[h]);
+      rank_.push_back(trip_aab[h] + trip_aba[h]);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      f3aaboff[h] = offset;
+      offset += trip_aab[h] * trip_aab[h]; // F3aab
+      dimensions_.push_back(trip_aab[h]);
+      rank_.push_back(trip_aab[h]);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      f3bbaoff[h] = offset;
+      offset += trip_aab[h] * trip_aab[h]; // F3bba
+      dimensions_.push_back(trip_aab[h]);
+      rank_.push_back(trip_aab[h]);
+    }
+  }
+  if (constrain_q3_) {
+    q3aaaoff = (int *)malloc(nirrep_ * sizeof(int));
+    q3bbboff = (int *)malloc(nirrep_ * sizeof(int));
+    q3aaboff = (int *)malloc(nirrep_ * sizeof(int));
+    q3bbaoff = (int *)malloc(nirrep_ * sizeof(int));
+    for (int h = 0; h < nirrep_; h++) {
+      q3aaaoff[h] = offset;
+      offset += trip_aaa[h] * trip_aaa[h]; // D3aaa
+      dimensions_.push_back(trip_aaa[h]);
+      rank_.push_back(trip_aaa[h]);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      q3bbboff[h] = offset;
+      offset += trip_aaa[h] * trip_aaa[h]; // D3bbb
+      dimensions_.push_back(trip_aaa[h]);
+      rank_.push_back(trip_aaa[h]);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      q3aaboff[h] = offset;
+      offset += trip_aab[h] * trip_aab[h]; // D3aab
+      dimensions_.push_back(trip_aab[h]);
+      rank_.push_back(trip_aab[h]);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      q3bbaoff[h] = offset;
+      offset += trip_aab[h] * trip_aab[h]; // D3bba
+      dimensions_.push_back(trip_aab[h]);
+      rank_.push_back(trip_aab[h]);
+    }
+  }
+  if (constrain_d3_) {
+    d3aaaoff = (int *)malloc(nirrep_ * sizeof(int));
+    d3bbboff = (int *)malloc(nirrep_ * sizeof(int));
+    d3aaboff = (int *)malloc(nirrep_ * sizeof(int));
+    d3bbaoff = (int *)malloc(nirrep_ * sizeof(int));
+    for (int h = 0; h < nirrep_; h++) {
+      d3aaaoff[h] = offset;
+      offset += trip_aaa[h] * trip_aaa[h]; // D3aaa
+      dimensions_.push_back(trip_aaa[h]);
+      rank_.push_back(trip_aaa[h]);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      d3bbboff[h] = offset;
+      offset += trip_aaa[h] * trip_aaa[h]; // D3bbb
+      dimensions_.push_back(trip_aaa[h]);
+      rank_.push_back(trip_aaa[h]);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      d3aaboff[h] = offset;
+      offset += trip_aab[h] * trip_aab[h]; // D3aab
+      dimensions_.push_back(trip_aab[h]);
+      rank_.push_back(trip_aab[h]);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      d3bbaoff[h] = offset;
+      offset += trip_aab[h] * trip_aab[h]; // D3bba
+      dimensions_.push_back(trip_aab[h]);
+      rank_.push_back(trip_aab[h]);
+    }
+  }
+  if (constrain_d4_) {
+    d4aaaaoff = (int *)malloc(nirrep_ * sizeof(int));
+    d4aaaboff = (int *)malloc(nirrep_ * sizeof(int));
+    d4aabboff = (int *)malloc(nirrep_ * sizeof(int));
+    d4bbbaoff = (int *)malloc(nirrep_ * sizeof(int));
+    d4bbbboff = (int *)malloc(nirrep_ * sizeof(int));
+    for (int h = 0; h < nirrep_; h++) {
+      d4aaaaoff[h] = offset;
+      offset += quartet_aaaa[h] * quartet_aaaa[h]; // D4aaaa
+      dimensions_.push_back(quartet_aaaa[h]);
+      rank_.push_back(quartet_aaaa[h]);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      d4aaaboff[h] = offset;
+      offset += quartet_aaab[h] * quartet_aaab[h]; // D4aaab
+      dimensions_.push_back(quartet_aaab[h]);
+      rank_.push_back(quartet_aaab[h]);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      d4aabboff[h] = offset;
+      offset += quartet_aabb[h] * quartet_aabb[h]; // D4aabb
+      dimensions_.push_back(quartet_aabb[h]);
+      rank_.push_back(quartet_aabb[h]);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      d4bbbaoff[h] = offset;
+      offset += quartet_aaab[h] * quartet_aaab[h]; // D4bbba
+      dimensions_.push_back(quartet_aaab[h]);
+      rank_.push_back(quartet_aaab[h]);
+    }
+    for (int h = 0; h < nirrep_; h++) {
+      d4bbbboff[h] = offset;
+      offset += quartet_aaaa[h] * quartet_aaaa[h]; // D4bbbb
+      dimensions_.push_back(quartet_aaaa[h]);
+      rank_.push_back(quartet_aaaa[h]);
+    }
+  }
 
-    if ( constrain_t1_ ) {
-        t1aaboff = (int*)malloc(nirrep_*sizeof(int));
-        t1bbaoff = (int*)malloc(nirrep_*sizeof(int));
-        t1aaaoff = (int*)malloc(nirrep_*sizeof(int));
-        t1bbboff = (int*)malloc(nirrep_*sizeof(int));
-        for (int h = 0; h < nirrep_; h++) {
-            t1aaaoff[h] = offset; 
-            offset += trip_aaa[h]*trip_aaa[h]; // T1aaa
-            dimensions_.push_back(trip_aaa[h]);
-            rank_.push_back(trip_aaa[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            t1bbboff[h] = offset; 
-            offset += trip_aaa[h]*trip_aaa[h]; // T1bbb
-            dimensions_.push_back(trip_aaa[h]);
-            rank_.push_back(trip_aaa[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            t1aaboff[h] = offset; 
-            offset += trip_aab[h]*trip_aab[h]; // T1aab
-            dimensions_.push_back(trip_aab[h]);
-            rank_.push_back(trip_aab[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            t1bbaoff[h] = offset; 
-            offset += trip_aab[h]*trip_aab[h]; // T1bba
-            dimensions_.push_back(trip_aab[h]);
-            rank_.push_back(trip_aab[h]);
-        }
+  if (constrain_gpc_) {
+    for (int my_state = 0; my_state < n_gpc_states_; my_state++) {
+      int *my_gpcoff = (int *)malloc(n_gpc_[my_state] * sizeof(int));
+      for (int i = 0; i < n_gpc_[my_state]; i++) {
+        my_gpcoff[i] = offset++;
+        dimensions_.push_back(1);
+        rank_.push_back(1);
+      }
+      gpcoff.push_back(my_gpcoff);
     }
-
-    if ( constrain_t2_ ) {
-        t2aaboff = (int*)malloc(nirrep_*sizeof(int));
-        t2bbaoff = (int*)malloc(nirrep_*sizeof(int));
-        t2aaaoff = (int*)malloc(nirrep_*sizeof(int));
-        t2bbboff = (int*)malloc(nirrep_*sizeof(int));
-        for (int h = 0; h < nirrep_; h++) {
-            t2aaaoff[h] = offset; 
-            offset += (trip_aab[h]+trip_aba[h])*(trip_aab[h]+trip_aba[h]); // T2aaa
-            dimensions_.push_back(trip_aab[h]+trip_aba[h]);
-            rank_.push_back(trip_aab[h]+trip_aba[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            t2bbboff[h] = offset; 
-            offset += (trip_aab[h]+trip_aba[h])*(trip_aab[h]+trip_aba[h]); // T2bbb
-            dimensions_.push_back(trip_aab[h]+trip_aba[h]);
-            rank_.push_back(trip_aab[h]+trip_aba[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            t2aaboff[h] = offset; 
-            offset += trip_aab[h]*trip_aab[h]; // T2aab
-            dimensions_.push_back(trip_aab[h]);
-            rank_.push_back(trip_aab[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            t2bbaoff[h] = offset; 
-            offset += trip_aab[h]*trip_aab[h]; // T2bba
-            dimensions_.push_back(trip_aab[h]);
-            rank_.push_back(trip_aab[h]);
-        }
-    }
-    if ( constrain_e3_ ) {
-        e3aaboff = (int*)malloc(nirrep_*sizeof(int));
-        e3bbaoff = (int*)malloc(nirrep_*sizeof(int));
-        e3aaaoff = (int*)malloc(nirrep_*sizeof(int));
-        e3bbboff = (int*)malloc(nirrep_*sizeof(int));
-        for (int h = 0; h < nirrep_; h++) {
-            e3aaaoff[h] = offset; 
-            offset += (trip_aab[h]+trip_aba[h])*(trip_aab[h]+trip_aba[h]); // E3aaa
-            dimensions_.push_back(trip_aab[h]+trip_aba[h]);
-            rank_.push_back(trip_aab[h]+trip_aba[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            e3bbboff[h] = offset; 
-            offset += (trip_aab[h]+trip_aba[h])*(trip_aab[h]+trip_aba[h]); // E3bbb
-            dimensions_.push_back(trip_aab[h]+trip_aba[h]);
-            rank_.push_back(trip_aab[h]+trip_aba[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            e3aaboff[h] = offset; 
-            offset += trip_aab[h]*trip_aab[h]; // E3aab
-            dimensions_.push_back(trip_aab[h]);
-            rank_.push_back(trip_aab[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            e3bbaoff[h] = 
-            offset; 
-            offset += trip_aab[h]*trip_aab[h]; // E3bba
-            dimensions_.push_back(trip_aab[h]);
-            rank_.push_back(trip_aab[h]);
-        }
-    }
-    if ( constrain_f3_ ) {
-        f3aaboff = (int*)malloc(nirrep_*sizeof(int));
-        f3bbaoff = (int*)malloc(nirrep_*sizeof(int));
-        f3aaaoff = (int*)malloc(nirrep_*sizeof(int));
-        f3bbboff = (int*)malloc(nirrep_*sizeof(int));
-        for (int h = 0; h < nirrep_; h++) {
-            f3aaaoff[h] = offset; 
-            offset += (trip_aab[h]+trip_aba[h])*(trip_aab[h]+trip_aba[h]); // F3aaa
-            dimensions_.push_back(trip_aab[h]+trip_aba[h]);
-            rank_.push_back(trip_aab[h]+trip_aba[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            f3bbboff[h] = offset;  
-            offset += (trip_aab[h]+trip_aba[h])*(trip_aab[h]+trip_aba[h]); // F3bbb
-            dimensions_.push_back(trip_aab[h]+trip_aba[h]);
-            rank_.push_back(trip_aab[h]+trip_aba[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            f3aaboff[h] = offset; 
-            offset += trip_aab[h]*trip_aab[h]; // F3aab
-            dimensions_.push_back(trip_aab[h]);
-            rank_.push_back(trip_aab[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            f3bbaoff[h] = offset; 
-            offset += trip_aab[h]*trip_aab[h]; // F3bba
-            dimensions_.push_back(trip_aab[h]);
-            rank_.push_back(trip_aab[h]);
-        }
-    }
-    if ( constrain_q3_ ) {
-        q3aaaoff = (int*)malloc(nirrep_*sizeof(int));
-        q3bbboff = (int*)malloc(nirrep_*sizeof(int));
-        q3aaboff = (int*)malloc(nirrep_*sizeof(int));
-        q3bbaoff = (int*)malloc(nirrep_*sizeof(int));
-        for (int h = 0; h < nirrep_; h++) {
-            q3aaaoff[h] = offset; 
-            offset += trip_aaa[h]*trip_aaa[h]; // D3aaa
-            dimensions_.push_back(trip_aaa[h]);
-            rank_.push_back(trip_aaa[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            q3bbboff[h] = offset; 
-            offset += trip_aaa[h]*trip_aaa[h]; // D3bbb
-            dimensions_.push_back(trip_aaa[h]);
-            rank_.push_back(trip_aaa[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            q3aaboff[h] = offset; 
-            offset += trip_aab[h]*trip_aab[h]; // D3aab
-            dimensions_.push_back(trip_aab[h]);
-            rank_.push_back(trip_aab[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            q3bbaoff[h] = offset; 
-            offset += trip_aab[h]*trip_aab[h]; // D3bba
-            dimensions_.push_back(trip_aab[h]);
-            rank_.push_back(trip_aab[h]);
-        }
-    }
-    if ( constrain_d3_ ) {
-        d3aaaoff = (int*)malloc(nirrep_*sizeof(int));
-        d3bbboff = (int*)malloc(nirrep_*sizeof(int));
-        d3aaboff = (int*)malloc(nirrep_*sizeof(int));
-        d3bbaoff = (int*)malloc(nirrep_*sizeof(int));
-        for (int h = 0; h < nirrep_; h++) {
-            d3aaaoff[h] = offset; 
-            offset += trip_aaa[h]*trip_aaa[h]; // D3aaa
-            dimensions_.push_back(trip_aaa[h]);
-            rank_.push_back(trip_aaa[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            d3bbboff[h] = offset; 
-            offset += trip_aaa[h]*trip_aaa[h]; // D3bbb
-            dimensions_.push_back(trip_aaa[h]);
-            rank_.push_back(trip_aaa[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            d3aaboff[h] = offset; 
-            offset += trip_aab[h]*trip_aab[h]; // D3aab
-            dimensions_.push_back(trip_aab[h]);
-            rank_.push_back(trip_aab[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            d3bbaoff[h] = offset; 
-            offset += trip_aab[h]*trip_aab[h]; // D3bba
-            dimensions_.push_back(trip_aab[h]);
-            rank_.push_back(trip_aab[h]);
-        }
-    }
-    if ( constrain_d4_ ) {
-        d4aaaaoff = (int*)malloc(nirrep_*sizeof(int));
-        d4aaaboff = (int*)malloc(nirrep_*sizeof(int));
-        d4aabboff = (int*)malloc(nirrep_*sizeof(int));
-        d4bbbaoff = (int*)malloc(nirrep_*sizeof(int));
-        d4bbbboff = (int*)malloc(nirrep_*sizeof(int));
-        for (int h = 0; h < nirrep_; h++) {
-            d4aaaaoff[h] = offset; 
-            offset += quartet_aaaa[h]*quartet_aaaa[h]; // D4aaaa
-            dimensions_.push_back(quartet_aaaa[h]);
-            rank_.push_back(quartet_aaaa[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            d4aaaboff[h] = offset; 
-            offset += quartet_aaab[h]*quartet_aaab[h]; // D4aaab
-            dimensions_.push_back(quartet_aaab[h]);
-            rank_.push_back(quartet_aaab[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            d4aabboff[h] = offset; 
-            offset += quartet_aabb[h]*quartet_aabb[h]; // D4aabb
-            dimensions_.push_back(quartet_aabb[h]);
-            rank_.push_back(quartet_aabb[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            d4bbbaoff[h] = offset; 
-            offset += quartet_aaab[h]*quartet_aaab[h]; // D4bbba
-            dimensions_.push_back(quartet_aaab[h]);
-            rank_.push_back(quartet_aaab[h]);
-        }
-        for (int h = 0; h < nirrep_; h++) {
-            d4bbbboff[h] = offset; 
-            offset += quartet_aaaa[h]*quartet_aaaa[h]; // D4bbbb
-            dimensions_.push_back(quartet_aaaa[h]);
-            rank_.push_back(quartet_aaaa[h]);
-        }
-    }
-
-    if ( constrain_gpc_ ) {
-        for (int my_state = 0; my_state < n_gpc_states_; my_state++) {
-            int * my_gpcoff = (int*)malloc(n_gpc_[my_state]*sizeof(int));
-            for (int i = 0; i < n_gpc_[my_state]; i++) {
-                my_gpcoff[i] = offset++;
-                dimensions_.push_back(1);
-                rank_.push_back(1);
-            }
-            gpcoff.push_back(my_gpcoff);
-        }
-    }
+  }
 }
 
 void v2RDMSolver::set_constraints() {
 
-    // pick conditions.  default is dqg
+  // pick conditions.  default is dqg
+  constrain_q2_ = true;
+  constrain_g2_ = true;
+  constrain_t1_ = false;
+  constrain_t2_ = false;
+  constrain_e3_ = false;
+  constrain_f3_ = false;
+  constrain_q3_ = false;
+  constrain_d3_ = false;
+  constrain_d4_ = false;
+  if (options_.get_str("POSITIVITY") == "D") {
+    constrain_q2_ = false;
+    constrain_g2_ = false;
+  } else if (options_.get_str("POSITIVITY") == "DQ") {
+    constrain_q2_ = true;
+    constrain_g2_ = false;
+  } else if (options_.get_str("POSITIVITY") == "DG") {
+    constrain_q2_ = false;
+    constrain_g2_ = true;
+  } else if (options_.get_str("POSITIVITY") == "DQGT1") {
     constrain_q2_ = true;
     constrain_g2_ = true;
-    constrain_t1_ = false;
-    constrain_t2_ = false;
-    constrain_e3_ = false;
-    constrain_f3_ = false;
-    constrain_q3_ = false;
-    constrain_d3_ = false;
-    constrain_d4_ = false;
-    if (options_.get_str("POSITIVITY")=="D") {
-        constrain_q2_ = false;
-        constrain_g2_ = false;
-    }else if (options_.get_str("POSITIVITY")=="DQ") {
-        constrain_q2_ = true;
-        constrain_g2_ = false;
-    }else if (options_.get_str("POSITIVITY")=="DG") {
-        constrain_q2_ = false;
-        constrain_g2_ = true;
-    }else if (options_.get_str("POSITIVITY")=="DQGT1") {
-        constrain_q2_ = true;
-        constrain_g2_ = true;
-        constrain_t1_ = true;
-    }else if (options_.get_str("POSITIVITY")=="DQGT2") {
-        constrain_q2_ = true;
-        constrain_g2_ = true;
-        constrain_t2_ = true;
-    }else if (options_.get_str("POSITIVITY")=="DQGT1T2") {
-        constrain_q2_ = true;
-        constrain_g2_ = true;
-        constrain_t1_ = true;
-        constrain_t2_ = true;
-    }else if (options_.get_str("POSITIVITY")=="DQGT") {
-        constrain_q2_ = true;
-        constrain_g2_ = true;
-        constrain_t1_ = true;
-        constrain_t2_ = true;
+    constrain_t1_ = true;
+  } else if (options_.get_str("POSITIVITY") == "DQGT2") {
+    constrain_q2_ = true;
+    constrain_g2_ = true;
+    constrain_t2_ = true;
+  } else if (options_.get_str("POSITIVITY") == "DQGT1T2") {
+    constrain_q2_ = true;
+    constrain_g2_ = true;
+    constrain_t1_ = true;
+    constrain_t2_ = true;
+  } else if (options_.get_str("POSITIVITY") == "DQGT") {
+    constrain_q2_ = true;
+    constrain_g2_ = true;
+    constrain_t1_ = true;
+    constrain_t2_ = true;
+  }
+
+  if (options_.get_bool("CONSTRAIN_D3")) {
+    constrain_d3_ = true;
+  }
+  if (options_.get_bool("CONSTRAIN_E3")) {
+    constrain_d3_ = true;
+    constrain_e3_ = true;
+  }
+  if (options_.get_bool("CONSTRAIN_F3")) {
+    constrain_d3_ = true;
+    constrain_f3_ = true;
+  }
+  if (options_.get_bool("CONSTRAIN_Q3")) {
+    constrain_d3_ = true;
+    constrain_q3_ = true;
+  }
+  if (options_.get_str("POSITIVITY") == "3POS") {
+    constrain_d3_ = true;
+    constrain_e3_ = true;
+    constrain_f3_ = true;
+    constrain_q3_ = true;
+  }
+
+  if (options_.get_bool("CONSTRAIN_D4")) {
+    constrain_d4_ = true;
+    if (!constrain_d3_) {
+      constrain_d3_ = true;
+    }
+  }
+
+  constrain_spin_ = options_.get_bool("CONSTRAIN_SPIN");
+
+  print_gpc_error_ = false;
+  constrain_gpc_ = false;
+  constrain_gpc_1rdm_ = false;
+  constrain_gpc_2rdm_ = false;
+  n_gpc_states_ = 0;
+
+  if (options_.get_str("GPC_CONSTRAINTS") == "1RDM") {
+    constrain_gpc_ = true;
+    constrain_gpc_1rdm_ = true;
+    n_gpc_states_ += 1;
+  }
+
+  if (options_.get_str("GPC_CONSTRAINTS") == "2RDM") {
+    constrain_gpc_2rdm_ = true;
+    throw PsiException("GPCs may not yet be applied to the 2RDM", __FILE__,
+                       __LINE__);
+  }
+
+  if (constrain_gpc_) {
+    // NatOrbs_ = (std::shared_ptr<Matrix>)(new Matrix(2*amo_,2*amo_));
+    for (int my_state = 0; my_state < n_gpc_states_; my_state++) {
+      NatOrbs_.push_back(
+          (std::shared_ptr<Matrix>)(new Matrix(2 * amo_, 2 * amo_)));
+    }
+  }
+
+  constrain_sz_ = options_.get_bool("CONSTRAIN_SZ");
+
+  if (constrain_gpc_) {
+
+    n_gpc_.clear();
+
+    if (constrain_gpc_1rdm_) {
+
+      int na = nalpha_ - nrstc_ - nfrzc_;
+      int nb = nbeta_ - nrstc_ - nfrzc_;
+
+      add_gpc_constraints(na, nb);
     }
 
-    if ( options_.get_bool("CONSTRAIN_D3") ) {
-        constrain_d3_ = true;
+    if (constrain_gpc_2rdm_) {
+      throw PsiException("GPCs may not yet be applied to the 2RDM", __FILE__,
+                         __LINE__);
     }
-    if ( options_.get_bool("CONSTRAIN_E3") ) {
-        constrain_d3_ = true;
-        constrain_e3_ = true;
-    }
-    if ( options_.get_bool("CONSTRAIN_F3") ) {
-        constrain_d3_ = true;
-        constrain_f3_ = true;
-    }
-    if ( options_.get_bool("CONSTRAIN_Q3") ) {
-        constrain_d3_ = true;
-        constrain_q3_ = true;
-    }
-    if (options_.get_str("POSITIVITY")=="3POS") {
-        constrain_d3_ = true;
-        constrain_e3_ = true;
-        constrain_f3_ = true;
-        constrain_q3_ = true;
-    }
-
-    if ( options_.get_bool("CONSTRAIN_D4") ) {
-        constrain_d4_ = true;
-        if ( !constrain_d3_ ) {
-            constrain_d3_ = true;
-        }
-    }
-
-    constrain_spin_ = options_.get_bool("CONSTRAIN_SPIN");
-
-    print_gpc_error_    = false;
-    constrain_gpc_      = false;
-    constrain_gpc_1rdm_ = false;
-    constrain_gpc_2rdm_ = false;
-    n_gpc_states_       = 0;
-
-    if ( options_.get_str("GPC_CONSTRAINTS") == "1RDM") {
-        constrain_gpc_      = true;
-        constrain_gpc_1rdm_ = true;
-        n_gpc_states_      += 1;
-    }
-
-    if ( options_.get_str("GPC_CONSTRAINTS") == "2RDM") {
-        constrain_gpc_2rdm_ = true;
-        throw PsiException("GPCs may not yet be applied to the 2RDM",__FILE__,__LINE__);
-    }
-
-    if ( constrain_gpc_ ) {
-        //NatOrbs_ = (std::shared_ptr<Matrix>)(new Matrix(2*amo_,2*amo_));
-        for (int my_state = 0; my_state < n_gpc_states_; my_state++) {
-            NatOrbs_.push_back((std::shared_ptr<Matrix>)(new Matrix(2*amo_,2*amo_)));
-        }
-
-    }
-
-    constrain_sz_ = options_.get_bool("CONSTRAIN_SZ");
-
-    if ( constrain_gpc_ ) {
-
-        n_gpc_.clear();
-
-        if ( constrain_gpc_1rdm_ ) {
-
-            int na = nalpha_ - nrstc_ - nfrzc_;
-            int nb = nbeta_ - nrstc_ - nfrzc_;
-
-            add_gpc_constraints(na,nb);
-
-        }
-
-        if ( constrain_gpc_2rdm_ ) {
-            throw PsiException("GPCs may not yet be applied to the 2RDM",__FILE__,__LINE__);
-        }
-
-    }
+  }
 }
 
 void v2RDMSolver::add_gpc_constraints(int na, int nb) {
 
-    int n = 0;
+  int n = 0;
 
-    if ( na + nb == 3 && amo_ == 4 ) {
-    
-        gpc_.push_back(GeneralizedPauli_3_8);
-        n += 31;
-        //n += 1; // force one orbital occupation to zero
-    
-    }else if ( na + nb == 4 && amo_ == 4 ) {
-    
-        gpc_.push_back(GeneralizedPauli_4_8);
-        n += 14;
-    
-    }else if ( na + nb == 5 && amo_ == 4 ) {
-    
-        gpc_.push_back(GeneralizedPauli_5_8);
-        n += 31;
-    
-    }else if ( na + nb == 3 && amo_ == 3 ) {
-    
-        gpc_.push_back(GeneralizedPauli_3_6);
-        n += 4;
-    
-    }else if ( na + nb == 4 && amo_ == 5 ) {
-    
-        gpc_.push_back(GeneralizedPauli_4_10);
-        n += 124;
-    
-    }else if ( na + nb == 6 && amo_ == 5 ) {
-    
-        gpc_.push_back(GeneralizedPauli_6_10);
-        n += 124;
-    
-    }else if ( na + nb == 5 && amo_ == 5 ) {
-    
-        gpc_.push_back(GeneralizedPauli_5_10);
-        n += 160;
-        //n += 10;
-    
-    }else if ( na + nb == 3 && amo_ == 5 ) {
-    
-        gpc_.push_back(GeneralizedPauli_3_10);
-        n += 93;
-    
-    }else if ( na + nb == 7 && amo_ == 5 ) {
-    
-        gpc_.push_back(GeneralizedPauli_7_10);
-        n += 93;
-    
-    }else {
-        outfile->Printf("    <<< Error >>> Generalized Pauli Constraints not implemented for this case:\n");
-        outfile->Printf("        nfrzc  = %5i\n",nfrzc_);
-        outfile->Printf("        nrstc  = %5i\n",nrstc_);
-        outfile->Printf("        na     = %5i\n",na);
-        outfile->Printf("        nb     = %5i\n",nb);
-        outfile->Printf("        amo    = %5i\n",amo_);
-        outfile->Printf("        nmo    = %5i\n",nmo_);
-        throw PsiException("Generalized Pauli Constraints not implemented for this case.",__FILE__,__LINE__);
-    }
+  if (na + nb == 3 && amo_ == 4) {
 
-    n_gpc_.push_back(n);
+    gpc_.push_back(GeneralizedPauli_3_8);
+    n += 31;
+    // n += 1; // force one orbital occupation to zero
 
+  } else if (na + nb == 4 && amo_ == 4) {
+
+    gpc_.push_back(GeneralizedPauli_4_8);
+    n += 14;
+
+  } else if (na + nb == 5 && amo_ == 4) {
+
+    gpc_.push_back(GeneralizedPauli_5_8);
+    n += 31;
+
+  } else if (na + nb == 3 && amo_ == 3) {
+
+    gpc_.push_back(GeneralizedPauli_3_6);
+    n += 4;
+
+  } else if (na + nb == 4 && amo_ == 5) {
+
+    gpc_.push_back(GeneralizedPauli_4_10);
+    n += 124;
+
+  } else if (na + nb == 6 && amo_ == 5) {
+
+    gpc_.push_back(GeneralizedPauli_6_10);
+    n += 124;
+
+  } else if (na + nb == 5 && amo_ == 5) {
+
+    gpc_.push_back(GeneralizedPauli_5_10);
+    n += 160;
+    // n += 10;
+
+  } else if (na + nb == 3 && amo_ == 5) {
+
+    gpc_.push_back(GeneralizedPauli_3_10);
+    n += 93;
+
+  } else if (na + nb == 7 && amo_ == 5) {
+
+    gpc_.push_back(GeneralizedPauli_7_10);
+    n += 93;
+
+  } else {
+    outfile->Printf("    <<< Error >>> Generalized Pauli Constraints not "
+                    "implemented for this case:\n");
+    outfile->Printf("        nfrzc  = %5i\n", nfrzc_);
+    outfile->Printf("        nrstc  = %5i\n", nrstc_);
+    outfile->Printf("        na     = %5i\n", na);
+    outfile->Printf("        nb     = %5i\n", nb);
+    outfile->Printf("        amo    = %5i\n", amo_);
+    outfile->Printf("        nmo    = %5i\n", nmo_);
+    throw PsiException(
+        "Generalized Pauli Constraints not implemented for this case.",
+        __FILE__, __LINE__);
+  }
+
+  n_gpc_.push_back(n);
 }
 
-void v2RDMSolver::set_gpc_maps(){
+void v2RDMSolver::set_gpc_maps() {
 
-    gpc_rdm_map_a_.clear();
-    gpc_rdm_map_b_.clear();
-    gpc_rdm_sign_a_.clear();
-    gpc_rdm_sign_b_.clear();
+  gpc_rdm_map_a_.clear();
+  gpc_rdm_map_b_.clear();
+  gpc_rdm_sign_a_.clear();
+  gpc_rdm_sign_b_.clear();
 
-    if ( constrain_gpc_1rdm_ ) {
+  if (constrain_gpc_1rdm_) {
 
-        // map 1/2rdm onto d1-like object
-        int *** my_map_a = (int***)malloc(nirrep_*sizeof(int **));
-        int *** my_map_b = (int***)malloc(nirrep_*sizeof(int **));
-        for (int h = 0; h < nirrep_; h++) {
-            my_map_a[h] = (int**)malloc(amopi_[h] * sizeof(int*));
-            my_map_b[h] = (int**)malloc(amopi_[h] * sizeof(int*));
-            for (int i = 0; i < amopi_[h]; i++) {
-                my_map_a[h][i] = (int*)malloc(amopi_[h] * sizeof(int));
-                my_map_b[h][i] = (int*)malloc(amopi_[h] * sizeof(int));
-            }
-        }
-
-        int *** my_sign_a = (int***)malloc(nirrep_*sizeof(int **));
-        int *** my_sign_b = (int***)malloc(nirrep_*sizeof(int **));
-        for (int h = 0; h < nirrep_; h++) {
-            my_sign_a[h] = (int**)malloc(amopi_[h] * sizeof(int*));
-            my_sign_b[h] = (int**)malloc(amopi_[h] * sizeof(int*));
-            for (int i = 0; i < amopi_[h]; i++) {
-                my_sign_a[h][i] = (int*)malloc(amopi_[h] * sizeof(int));
-                my_sign_b[h][i] = (int*)malloc(amopi_[h] * sizeof(int));
-            }
-        }
-
-        if ( gpc_[0] == GeneralizedPauli_5_8 || gpc_[0] == GeneralizedPauli_6_10 || gpc_[0] == GeneralizedPauli_7_10 ) {
-            // q1
-            for (int h = 0; h < nirrep_; h++) {
-                for (int i = 0; i < amopi_[h]; i++) {
-                    for (int j = 0; j < amopi_[h]; j++) {
-                        my_map_a[h][i][j] = q1aoff[h] + i * amopi_[h] + j;
-                        my_map_b[h][i][j] = q1boff[h] + i * amopi_[h] + j;
-                        my_sign_a[h][i][j] = 1;
-                        my_sign_b[h][i][j] = 1;
-                    }
-                }
-            }
-        }else {
-            // d1
-            for (int h = 0; h < nirrep_; h++) {
-                for (int i = 0; i < amopi_[h]; i++) {
-                    for (int j = 0; j < amopi_[h]; j++) {
-                        my_map_a[h][i][j] = d1aoff[h] + i * amopi_[h] + j;
-                        my_map_b[h][i][j] = d1boff[h] + i * amopi_[h] + j;
-                        my_sign_a[h][i][j] = 1;
-                        my_sign_b[h][i][j] = 1;
-                    }
-                }
-            }
-        }
-
-        gpc_rdm_map_a_.push_back(my_map_a);
-        gpc_rdm_map_b_.push_back(my_map_b);
-        gpc_rdm_sign_a_.push_back(my_sign_a);
-        gpc_rdm_sign_b_.push_back(my_sign_b);
-
+    // map 1/2rdm onto d1-like object
+    int ***my_map_a = (int ***)malloc(nirrep_ * sizeof(int **));
+    int ***my_map_b = (int ***)malloc(nirrep_ * sizeof(int **));
+    for (int h = 0; h < nirrep_; h++) {
+      my_map_a[h] = (int **)malloc(amopi_[h] * sizeof(int *));
+      my_map_b[h] = (int **)malloc(amopi_[h] * sizeof(int *));
+      for (int i = 0; i < amopi_[h]; i++) {
+        my_map_a[h][i] = (int *)malloc(amopi_[h] * sizeof(int));
+        my_map_b[h][i] = (int *)malloc(amopi_[h] * sizeof(int));
+      }
     }
 
-    if ( constrain_gpc_2rdm_ ) {
-        throw PsiException("GPCs may not yet be applied to the 2RDM",__FILE__,__LINE__);
+    int ***my_sign_a = (int ***)malloc(nirrep_ * sizeof(int **));
+    int ***my_sign_b = (int ***)malloc(nirrep_ * sizeof(int **));
+    for (int h = 0; h < nirrep_; h++) {
+      my_sign_a[h] = (int **)malloc(amopi_[h] * sizeof(int *));
+      my_sign_b[h] = (int **)malloc(amopi_[h] * sizeof(int *));
+      for (int i = 0; i < amopi_[h]; i++) {
+        my_sign_a[h][i] = (int *)malloc(amopi_[h] * sizeof(int));
+        my_sign_b[h][i] = (int *)malloc(amopi_[h] * sizeof(int));
+      }
     }
-    
 
+    if (gpc_[0] == GeneralizedPauli_5_8 || gpc_[0] == GeneralizedPauli_6_10 ||
+        gpc_[0] == GeneralizedPauli_7_10) {
+      // q1
+      for (int h = 0; h < nirrep_; h++) {
+        for (int i = 0; i < amopi_[h]; i++) {
+          for (int j = 0; j < amopi_[h]; j++) {
+            my_map_a[h][i][j] = q1aoff[h] + i * amopi_[h] + j;
+            my_map_b[h][i][j] = q1boff[h] + i * amopi_[h] + j;
+            my_sign_a[h][i][j] = 1;
+            my_sign_b[h][i][j] = 1;
+          }
+        }
+      }
+    } else {
+      // d1
+      for (int h = 0; h < nirrep_; h++) {
+        for (int i = 0; i < amopi_[h]; i++) {
+          for (int j = 0; j < amopi_[h]; j++) {
+            my_map_a[h][i][j] = d1aoff[h] + i * amopi_[h] + j;
+            my_map_b[h][i][j] = d1boff[h] + i * amopi_[h] + j;
+            my_sign_a[h][i][j] = 1;
+            my_sign_b[h][i][j] = 1;
+          }
+        }
+      }
+    }
+
+    gpc_rdm_map_a_.push_back(my_map_a);
+    gpc_rdm_map_b_.push_back(my_map_b);
+    gpc_rdm_sign_a_.push_back(my_sign_a);
+    gpc_rdm_sign_b_.push_back(my_sign_b);
+  }
+
+  if (constrain_gpc_2rdm_) {
+    throw PsiException("GPCs may not yet be applied to the 2RDM", __FILE__,
+                       __LINE__);
+  }
 }
 
 void v2RDMSolver::print_header() {
 
-    outfile->Printf("\n");
-    outfile->Printf("    initial primal energy: %20.12lf\n",C_DDOT(n_primal_,c->pointer(),1,x->pointer(),1));
-    outfile->Printf("\n");
+  outfile->Printf("\n");
+  outfile->Printf("    initial primal energy: %20.12lf\n",
+                  C_DDOT(n_primal_, c->pointer(), 1, x->pointer(), 1));
+  outfile->Printf("\n");
 
-    if ( options_.get_str("SDP_SOLVER") == "BPSDP" ) {
+  if (options_.get_str("SDP_SOLVER") == "BPSDP" || options_.get_str("SDP_SOLVER") == "GPU_ADMM") {
 
-        outfile->Printf("      oiter");
-        outfile->Printf(" iiter");
-        outfile->Printf("        E(p)");
-        outfile->Printf("        E(d)");
-        outfile->Printf("       E(gap)");
-        outfile->Printf("      mu");
-        outfile->Printf("      eps(p)");
-        outfile->Printf("      eps(d)\n");
+    outfile->Printf("      oiter");
+    outfile->Printf(" iiter");
+    outfile->Printf("        E(p)");
+    outfile->Printf("        E(d)");
+    outfile->Printf("       E(gap)");
+    outfile->Printf("      mu");
+    outfile->Printf("      eps(p)");
+    outfile->Printf("      eps(d)\n");
 
-    }else if ( options_.get_str("SDP_SOLVER") == "RRSDP" ) {
+  } else if (options_.get_str("SDP_SOLVER") == "RRSDP") {
 
-        outfile->Printf("           oiter");
-        outfile->Printf("        iiter");
-        outfile->Printf("            L");
-        outfile->Printf("            E");
-        outfile->Printf("           mu");
-        outfile->Printf("     ||Ax-b||\n");
-
-    }
-
+    outfile->Printf("           oiter");
+    outfile->Printf("        iiter");
+    outfile->Printf("            L");
+    outfile->Printf("            E");
+    outfile->Printf("           mu");
+    outfile->Printf("     ||Ax-b||\n");
+  }
 }
 
-} //end namespaces
+} // namespace hilbert

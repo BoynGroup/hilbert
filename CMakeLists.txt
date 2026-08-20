@@ -17,6 +17,17 @@ include(psi4OptionsTools)
 find_package(psi4 REQUIRED)
 find_package(pybind11 REQUIRED)
 
+option(HILBERT_ENABLE_CUDA_FOCAS "Build the optional CUDA/cuBLAS FOCAS C1 DF transform" OFF)
+if(HILBERT_ENABLE_CUDA_FOCAS)
+        enable_language(CUDA)
+        find_package(CUDAToolkit REQUIRED)
+        set(CMAKE_CUDA_STANDARD 17)
+        set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+        set(focas_cuda src/focas/focas_cuda_bridge.cu)
+else()
+        set(focas_cuda src/focas/focas_cuda_jit.cc)
+endif()
+
 # Include QED-CC CMake configurations if requested
 include(${PROJECT_SOURCE_DIR}/cmake/cc_cavity.cmake)
 
@@ -59,6 +70,7 @@ set(pp2rdm
 set(focas
         src/focas/update_transformation_matrix.cc
         src/focas/orbital_optimizer.cc
+        ${focas_cuda}
         src/focas/C_files/orbopt_energy.cc
         src/focas/C_files/orbopt_gradient.cc
         src/focas/C_files/orbopt_hessian.cc
@@ -130,6 +142,7 @@ set(v2rdm_casscf
         src/v2rdm_casscf/python_api.cc
         src/v2rdm_casscf/q2.cc
         src/v2rdm_casscf/sortintegrals.cc
+        src/v2rdm_casscf/sparse_a.cc
         src/v2rdm_casscf/spin.cc
         src/v2rdm_casscf/t1.cc
         src/v2rdm_casscf/t2.cc
@@ -185,6 +198,14 @@ target_include_directories(hilbert PRIVATE "${PROJECT_SOURCE_DIR}/src")
 
 target_link_libraries(hilbert PUBLIC sdp)
 target_link_libraries(hilbert PUBLIC LBFGS::lib)
+target_compile_definitions(hilbert PRIVATE USING_PCMSolver)
+target_link_libraries(hilbert PRIVATE ${CMAKE_DL_LIBS})
+
+if(HILBERT_ENABLE_CUDA_FOCAS)
+        target_compile_definitions(hilbert PRIVATE HILBERT_ENABLE_CUDA_FOCAS)
+        target_link_libraries(hilbert PUBLIC CUDA::cudart CUDA::cublas)
+        set_source_files_properties(src/focas/focas_cuda_bridge.cu PROPERTIES CUDA_STANDARD 17)
+endif()
 
 if(WITH_TA)
   target_link_libraries(hilbert PUBLIC mpi4py::mpi4py tiledarray)

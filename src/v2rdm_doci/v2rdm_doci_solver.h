@@ -184,7 +184,7 @@ class v2RDM_DOCISolver: public Wavefunction{
     /// standard vector of dimensions of each block of primal solution vector
     std::vector<int> dimensions_;
 
-    int offset;
+    static thread_local int offset;
 
     // mapping arrays with abelian symmetry
     void BuildBasis();

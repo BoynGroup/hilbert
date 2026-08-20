@@ -27,8 +27,23 @@
 module focas_transform_teints
   
   use focas_data
+  use iso_c_binding, only: c_int, c_long_long, c_double
 
   implicit none
+
+  interface
+    integer(c_int) function hilbert_focas_df_c1_cuda_transform(nmo,nQ,int2,u,block_q,max_devices,verbose) &
+        bind(C,name="hilbert_focas_df_c1_cuda_transform")
+      import :: c_int, c_long_long, c_double
+      integer(c_int), value       :: nmo
+      integer(c_long_long), value :: nQ
+      real(c_double)              :: int2(*)
+      real(c_double), intent(in)  :: u(*)
+      integer(c_int), value       :: block_q
+      integer(c_int), value       :: max_devices
+      integer(c_int), value       :: verbose
+    end function hilbert_focas_df_c1_cuda_transform
+  end interface
   
   contains
 
@@ -51,19 +66,60 @@ module focas_transform_teints
       integer :: i_thread,sym_L,sym_R,L_eq_I,R_eq_I,L,R,max_nmopi
       integer :: nmo_R,nmo_L,R_copy
       integer :: nfz_R,nac_R,nfz_L,nac_L
+      integer :: sym_cuda_status
       integer(ip) :: first_Q(nthread_use_),last_Q(nthread_use_)
       integer(ip) :: int_ind,nQ,Q
+      logical :: profile_transform
+      real(wp) :: t0(2),t1(2)
+      real(wp) :: t_wall_alloc,t_wall_setup,t_wall_work,t_wall_dealloc
+      real(wp) :: t_wall_gather,t_wall_transform,t_wall_scatter
 
       nQ                  = int(df_vars_%nQ,kind=ip)
 
       max_nmopi           = maxval(trans_%nmopi)
 
+      profile_transform   = (log_print_ == 1)
+      t_wall_alloc        = 0.0_wp
+      t_wall_setup        = 0.0_wp
+      t_wall_work         = 0.0_wp
+      t_wall_dealloc      = 0.0_wp
+      t_wall_gather       = 0.0_wp
+      t_wall_transform    = 0.0_wp
+      t_wall_scatter      = 0.0_wp
+
+      if ( use_c1_blocked_df_transform() ) then
+        transform_teints_df = transform_teints_df_c1_blocked()
+        return
+      end if
+
+      ! symmetry-general GPU transform (reuses the dense-U CUDA kernel); falls
+      ! through to the CPU transform below on any nonzero device status
+      if ( use_sym_blocked_df_transform() ) then
+        sym_cuda_status = transform_teints_df_sym_blocked()
+        if ( sym_cuda_status == 0 ) then
+          transform_teints_df = 0
+          return
+        end if
+      end if
+
+      if (profile_transform) t0 = timer()
       transform_teints_df = allocate_tmp_matrices()
+      if (profile_transform) then
+        t1 = timer()
+        t_wall_alloc = t1(1) - t0(1)
+      end if
 
+      if (profile_transform) t0 = timer()
       transform_teints_df = setup_Q_bounds()
+      if (profile_transform) then
+        t1 = timer()
+        t_wall_setup = t1(1) - t0(1)
+      end if
 
-!$omp parallel shared(first_Q,last_Q,int2,df_vars_,nirrep_) num_threads(nthread_use_)
-!$omp do private(i_thread,Q,int_ind,sym_R,sym_L,nmo_R,nmo_L,L,R,R_eq_I,L_eq_I,R_copy)
+      if (profile_transform) t0 = timer()
+!$omp parallel shared(first_Q,last_Q,int2,df_vars_,nirrep_,profile_transform) &
+!$omp& reduction(+:t_wall_gather,t_wall_transform,t_wall_scatter) num_threads(nthread_use_)
+!$omp do private(i_thread,Q,int_ind,sym_R,sym_L,nmo_R,nmo_L,L,R,R_eq_I,L_eq_I,R_copy,t0,t1)
 
       do i_thread = 1 , nthread_use_
 
@@ -74,6 +130,8 @@ module focas_transform_teints
           ! *************************************************************
           ! *** GATHER ( only LT row > col elements are accessed in int2)
           ! *************************************************************
+
+          if (profile_transform) t0 = timer()
 
 !          int_ind =  int(Q,kind=ip)  
           int_ind = ( ( Q - 1 ) * int(ngem_tot_,kind = ip) ) + 1
@@ -110,9 +168,16 @@ module focas_transform_teints
 
           end do
 
+          if (profile_transform) then
+            t1 = timer()
+            t_wall_gather = t_wall_gather + t1(1) - t0(1)
+          end if
+
           ! **************************************************************
           ! *** TRANSFORM (only lower triangular blocks are transformed )
           ! **************************************************************
+
+          if (profile_transform) t0 = timer()
 
           ! ***********************************************************
           ! THIS CODE ONLY TAKES ANDVANTAGE OF PARTIAL SPARSE STRUCTURE 
@@ -195,9 +260,16 @@ module focas_transform_teints
 
           end do ! sym_R loop
 
+          if (profile_transform) then
+            t1 = timer()
+            t_wall_transform = t_wall_transform + t1(1) - t0(1)
+          end if
+
           ! *************************************************************
           ! *** SCATTER (only LT row > col elements are accessed in int2)
           ! *************************************************************
+
+          if (profile_transform) t0 = timer()
 
 !          int_ind =  int(Q,kind=ip)
           int_ind = ( ( Q - 1 ) * int(ngem_tot_,kind = ip) ) + 1
@@ -234,18 +306,361 @@ module focas_transform_teints
 
           end do
 
+          if (profile_transform) then
+            t1 = timer()
+            t_wall_scatter = t_wall_scatter + t1(1) - t0(1)
+          end if
+
         end do ! end Q loop
 
       end do ! end i_thread loop
 
 !$omp end do
 !$omp end parallel
+      if (profile_transform) then
+        t1 = timer()
+        t_wall_work = t1(1) - t0(1)
+      end if
 
+      if (profile_transform) t0 = timer()
       transform_teints_df = deallocate_tmp_matrices()
+      if (profile_transform) then
+        t1 = timer()
+        t_wall_dealloc = t1(1) - t0(1)
+        write(fid_,'(a,1x,i10,7(1x,f11.3))') 'df_transform',int(nQ), &
+             t_wall_alloc,t_wall_setup,t_wall_work,t_wall_gather, &
+             t_wall_transform,t_wall_scatter,t_wall_dealloc
+      end if
 
       return
 
       contains
+
+        logical function use_c1_blocked_df_transform()
+
+          implicit none
+
+          integer           :: nmo
+
+          use_c1_blocked_df_transform = .false.
+
+          if ( focas_df_c1_blocked_enabled_ == 0 ) return
+          if ( nirrep_ /= 1 ) return
+          if ( df_vars_%Qstride /= ngem_tot_ ) return
+          if ( .not. allocated(trans_%nmopi) ) return
+          if ( .not. allocated(trans_%U_eq_I) ) return
+          if ( trans_%nmopi(1) <= 0 ) return
+
+          nmo = trans_%nmopi(1)
+          if ( nmo * ( nmo + 1 ) / 2 /= ngem_tot_ ) return
+
+          use_c1_blocked_df_transform = .true.
+
+          return
+
+        end function use_c1_blocked_df_transform
+
+        integer function transform_teints_df_c1_blocked()
+
+          implicit none
+
+          integer                :: nmo,block_q,cuda_block_q,nQ_int
+          integer                :: cuda_status
+          integer                :: nrow_alloc,block_start,bq
+          integer                :: q_rel,q_abs,row_offset
+          integer                :: i_mo,j_mo
+          integer(ip)            :: int_ind
+          real(wp)               :: t_loc0(2),t_loc1(2)
+          real(wp)               :: t_alloc,t_work,t_gather,t_transform
+          real(wp)               :: t_scatter,t_dealloc
+          real(wp)               :: scratch_budget_bytes,block_bytes
+          real(wp), allocatable  :: right(:,:),tmp(:,:),left_mat(:,:),result(:,:)
+
+          nmo      = trans_%nmopi(1)
+          nQ_int   = int(nQ)
+
+          if ( focas_df_c1_block_q_ > 0 ) then
+            block_q = focas_df_c1_block_q_
+          else
+            block_bytes = 4.0_wp * 8.0_wp * real(nthread_use_,wp) * &
+                 real(nmo,wp) * real(nmo,wp)
+            if ( focas_df_c1_block_memory_mib_ > 0 ) then
+              scratch_budget_bytes = real(focas_df_c1_block_memory_mib_,wp) * &
+                   1024.0_wp * 1024.0_wp
+            else
+              scratch_budget_bytes = 64.0_wp * 1024.0_wp * 1024.0_wp * &
+                   real(nthread_use_,wp)
+            end if
+            block_q = int(scratch_budget_bytes / block_bytes)
+            block_q = max(1,min(focas_df_c1_block_q_max_,block_q))
+          end if
+          block_q  = min(block_q,nQ_int)
+
+          transform_teints_df_c1_blocked = 0
+
+          if ( trans_%U_eq_I(1) == 1 ) then
+            if ( profile_transform ) then
+              write(fid_,'(a,1x,i10,7(1x,f11.3),1x,a)') 'df_transform', &
+                   int(nQ),0.0_wp,0.0_wp,0.0_wp,0.0_wp,0.0_wp,0.0_wp, &
+                   0.0_wp,'c1_blocked_identity'
+            end if
+            return
+          end if
+
+          t_alloc     = 0.0_wp
+          t_work      = 0.0_wp
+          t_gather    = 0.0_wp
+          t_transform = 0.0_wp
+          t_scatter   = 0.0_wp
+          t_dealloc   = 0.0_wp
+
+          if ( focas_df_c1_cuda_enabled_ /= 0 ) then
+            if ( focas_df_c1_cuda_validate_ /= 0 ) then
+              if ( profile_transform ) then
+                write(fid_,'(a)') 'df_transform_cuda validation requested; falling back to CPU transform'
+              end if
+            else
+              if ( profile_transform ) t0 = timer()
+              cuda_block_q = block_q
+              if ( focas_df_c1_block_q_ <= 0 ) cuda_block_q = 0
+              cuda_status = hilbert_focas_df_c1_cuda_transform( &
+                   nmo,int(nQ_int,kind=c_long_long),int2, &
+                   trans_%u_irrep_block(1)%val,cuda_block_q, &
+                   focas_df_c1_cuda_num_gpus_, &
+                   focas_df_c1_cuda_verbose_)
+              if ( profile_transform ) then
+                t1 = timer()
+                t_work = t1(1) - t0(1)
+              end if
+
+              if ( cuda_status == 0 ) then
+                if ( profile_transform ) then
+                  write(fid_,'(a,1x,i10,7(1x,f11.3),1x,a,1x,i5)') &
+                       'df_transform',int(nQ),0.0_wp,0.0_wp,t_work, &
+                       0.0_wp,t_work,0.0_wp,0.0_wp,'c1_cuda',cuda_block_q
+                end if
+                return
+              else
+                if ( profile_transform ) then
+                  write(fid_,'(a,1x,i6,1x,a)') &
+                       'df_transform_cuda_fallback status',cuda_status, &
+                       'using CPU c1_blocked transform'
+                end if
+              end if
+            end if
+          end if
+
+          nrow_alloc = nmo * block_q
+
+          if ( profile_transform ) t0 = timer()
+!$omp parallel private(right,tmp,left_mat,result,block_start,bq,q_rel,q_abs, &
+!$omp& row_offset,i_mo,j_mo,int_ind,t_loc0,t_loc1) &
+!$omp& reduction(+:t_alloc,t_gather,t_transform,t_scatter,t_dealloc) &
+!$omp& num_threads(nthread_use_)
+
+          if ( profile_transform ) t_loc0 = timer()
+          allocate(right(nrow_alloc,nmo))
+          allocate(tmp(nrow_alloc,nmo))
+          allocate(left_mat(nmo,nrow_alloc))
+          allocate(result(nmo,nrow_alloc))
+          if ( profile_transform ) then
+            t_loc1 = timer()
+            t_alloc = t_alloc + t_loc1(1) - t_loc0(1)
+          end if
+
+!$omp do schedule(dynamic)
+          do block_start = 1 , nQ_int , block_q
+
+            bq = min(block_q,nQ_int-block_start+1)
+
+            if ( profile_transform ) t_loc0 = timer()
+            do q_rel = 1 , bq
+              q_abs      = block_start + q_rel - 1
+              row_offset = ( q_rel - 1 ) * nmo
+              int_ind    = ( ( int(q_abs,kind=ip) - 1_ip ) * &
+                           int(ngem_tot_,kind=ip) ) + 1_ip
+
+              do j_mo = 1 , nmo
+                do i_mo = 1 , j_mo
+                  right(row_offset+i_mo,j_mo) = int2(int_ind)
+                  right(row_offset+j_mo,i_mo) = int2(int_ind)
+                  int_ind = int_ind + 1_ip
+                end do
+              end do
+            end do
+            if ( profile_transform ) then
+              t_loc1 = timer()
+              t_gather = t_gather + t_loc1(1) - t_loc0(1)
+            end if
+
+            if ( profile_transform ) t_loc0 = timer()
+            call dgemm('N','N',nmo*bq,nmo,nmo,1.0_wp,right,nrow_alloc, &
+                 & trans_%u_irrep_block(1)%val,nmo,0.0_wp,tmp,nrow_alloc)
+
+            do q_rel = 1 , bq
+              row_offset = ( q_rel - 1 ) * nmo
+              do j_mo = 1 , nmo
+                left_mat(1:nmo,row_offset+j_mo) = &
+                     tmp(row_offset+1:row_offset+nmo,j_mo)
+              end do
+            end do
+
+            call dgemm('T','N',nmo,nmo*bq,nmo,1.0_wp, &
+                 & trans_%u_irrep_block(1)%val,nmo,left_mat,nmo, &
+                 & 0.0_wp,result,nmo)
+            if ( profile_transform ) then
+              t_loc1 = timer()
+              t_transform = t_transform + t_loc1(1) - t_loc0(1)
+            end if
+
+            if ( profile_transform ) t_loc0 = timer()
+            do q_rel = 1 , bq
+              q_abs      = block_start + q_rel - 1
+              row_offset = ( q_rel - 1 ) * nmo
+              int_ind    = ( ( int(q_abs,kind=ip) - 1_ip ) * &
+                           int(ngem_tot_,kind=ip) ) + 1_ip
+
+              do j_mo = 1 , nmo
+                do i_mo = 1 , j_mo
+                  int2(int_ind) = result(i_mo,row_offset+j_mo)
+                  int_ind = int_ind + 1_ip
+                end do
+              end do
+            end do
+            if ( profile_transform ) then
+              t_loc1 = timer()
+              t_scatter = t_scatter + t_loc1(1) - t_loc0(1)
+            end if
+
+          end do
+!$omp end do
+
+          if ( profile_transform ) t_loc0 = timer()
+          deallocate(right)
+          deallocate(tmp)
+          deallocate(left_mat)
+          deallocate(result)
+          if ( profile_transform ) then
+            t_loc1 = timer()
+            t_dealloc = t_dealloc + t_loc1(1) - t_loc0(1)
+          end if
+
+!$omp end parallel
+          if ( profile_transform ) then
+            t1 = timer()
+            t_work = t1(1) - t0(1)
+            write(fid_,'(a,1x,i10,7(1x,f11.3),1x,a,1x,i5)') &
+                 'df_transform',int(nQ),t_alloc,0.0_wp,t_work,t_gather, &
+                 t_transform,t_scatter,t_dealloc,'c1_blocked',block_q
+          end if
+
+          return
+
+        end function transform_teints_df_c1_blocked
+
+        logical function use_sym_blocked_df_transform()
+          ! Symmetry-general GPU DF transform. The existing dense-U CUDA kernel
+          ! works for any point group: int2 is the full df-order (irrep-major)
+          ! packed triangle, so transforming with a block-diagonal U reproduces
+          ! U^T g U exactly (cross-irrep blocks are physically zero and stay so).
+          implicit none
+
+          use_sym_blocked_df_transform = .false.
+
+          if ( focas_df_c1_cuda_enabled_ == 0 ) return
+          if ( focas_df_c1_cuda_validate_ /= 0 ) return
+          if ( df_vars_%Qstride /= ngem_tot_ ) return
+          if ( nmo_tot_ <= 0 ) return
+          if ( int(nmo_tot_,kind=ip) * ( int(nmo_tot_,kind=ip) + 1_ip ) / 2_ip /= &
+               int(ngem_tot_,kind=ip) ) return
+          if ( .not. allocated(trans_%nmopi) ) return
+          if ( .not. allocated(trans_%U_eq_I) ) return
+
+          use_sym_blocked_df_transform = .true.
+
+          return
+        end function use_sym_blocked_df_transform
+
+        integer function transform_teints_df_sym_blocked()
+          ! Assemble the block-diagonal orbital rotation U (df / irrep-major
+          ! order) and hand the full packed int2 to the dense-U CUDA transform.
+          implicit none
+
+          integer               :: nmo,nQ_int,cuda_block_q,cuda_status
+          integer               :: p_sym,i,j,base,all_identity
+          real(wp)              :: t_work
+          real(wp), allocatable :: u_dense(:,:)
+
+          transform_teints_df_sym_blocked = 0
+
+          nmo    = nmo_tot_
+          nQ_int = int(nQ)
+
+          ! if every irrep block is the identity, there is nothing to transform
+          all_identity = 1
+          do p_sym = 1 , nirrep_
+            if ( trans_%nmopi(p_sym) <= 0 ) cycle
+            if ( trans_%U_eq_I(p_sym) == 0 ) all_identity = 0
+          end do
+          if ( all_identity == 1 ) then
+            if ( profile_transform ) &
+              write(fid_,'(a,1x,i10,7(1x,f11.3),1x,a)') 'df_transform', &
+                   int(nQ),0.0_wp,0.0_wp,0.0_wp,0.0_wp,0.0_wp,0.0_wp,0.0_wp, &
+                   'sym_cuda_identity'
+            return
+          end if
+
+          ! assemble the dense block-diagonal U in df (irrep-major) order
+          allocate(u_dense(nmo,nmo))
+          u_dense = 0.0_wp
+          base = 0
+          do p_sym = 1 , nirrep_
+            if ( trans_%nmopi(p_sym) > 0 ) then
+              if ( trans_%U_eq_I(p_sym) == 1 ) then
+                do i = 1 , trans_%nmopi(p_sym)
+                  u_dense(base+i,base+i) = 1.0_wp
+                end do
+              else
+                do j = 1 , trans_%nmopi(p_sym)
+                  do i = 1 , trans_%nmopi(p_sym)
+                    u_dense(base+i,base+j) = trans_%u_irrep_block(p_sym)%val(i,j)
+                  end do
+                end do
+              end if
+            end if
+            base = base + trans_%nmopi(p_sym)
+          end do
+
+          cuda_block_q = 0
+          if ( focas_df_c1_block_q_ > 0 ) cuda_block_q = focas_df_c1_block_q_
+
+          if ( profile_transform ) t0 = timer()
+          cuda_status = hilbert_focas_df_c1_cuda_transform( &
+               nmo,int(nQ_int,kind=c_long_long),int2,u_dense,cuda_block_q, &
+               focas_df_c1_cuda_num_gpus_,focas_df_c1_cuda_verbose_)
+          if ( profile_transform ) then
+            t1 = timer()
+            t_work = t1(1) - t0(1)
+          end if
+
+          deallocate(u_dense)
+
+          if ( cuda_status /= 0 ) then
+            transform_teints_df_sym_blocked = cuda_status
+            if ( profile_transform .and. ( focas_df_c1_cuda_verbose_ /= 0 ) ) &
+              write(fid_,'(a,1x,i6,1x,a)') &
+                   'df_transform_sym_cuda_fallback status',cuda_status, &
+                   'using CPU transform'
+            return
+          end if
+
+          if ( profile_transform ) &
+            write(fid_,'(a,1x,i10,7(1x,f11.3),1x,a,1x,i5)') 'df_transform', &
+                 int(nQ),0.0_wp,0.0_wp,t_work,0.0_wp,t_work,0.0_wp,0.0_wp, &
+                 'sym_cuda',cuda_block_q
+
+          return
+        end function transform_teints_df_sym_blocked
 
         subroutine symmetrize_diagonal_block(diag_block,ndim)
 

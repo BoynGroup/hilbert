@@ -145,54 +145,138 @@ void v2RDMSolver::RepackIntegrals(){
     // two-electron part
     long int na = nalpha_ - nrstc_ - nfrzc_;
     long int nb = nbeta_ - nrstc_ - nfrzc_;
-    for (int h = 0; h < nirrep_; h++) {
-        #pragma omp parallel for schedule (static)
-        for (long int ij = 0; ij < gems_ab[h]; ij++) {
-            long int i = bas_ab_sym[h][ij][0];
-            long int j = bas_ab_sym[h][ij][1];
 
-            long int ii = full_basis[i];
-            long int jj = full_basis[j];
+    if ( is_df_ ) {
 
-            for (long int kl = 0; kl < gems_ab[h]; kl++) {
-                long int k = bas_ab_sym[h][kl][0];
-                long int l = bas_ab_sym[h][kl][1];
+        // Build the active-space two-electron integrals (ik|jl) as a single
+        // matrix product instead of O(nact^4) cache-hostile strided dot
+        // products over the Q-major Qmo_ buffer.  The DF integrals factorize as
+        // (ik|jl) = sum_Q B(ik,Q) B(jl,Q); gathering the active slice B into a
+        // contiguous (npair x nQ) buffer and forming ERI_act = B B^T with one
+        // DGEMM replaces ~nact^4 strided DDOTs (the same fix as the FOCAS
+        // energy/Hessian bottlenecks).
 
-                long int kk = full_basis[k];
-                long int ll = full_basis[l];
+        long int ngem_full = (long int)(nmo_ - nfrzv_) * ( (long int)(nmo_ - nfrzv_) + 1L ) / 2L;
+        long int npair     = (long int)amo_ * ( (long int)amo_ + 1L ) / 2L;
 
-                int hik = SymmetryPair(symmetry[i],symmetry[k]);
-
-                c_p[d2aboff[h] + ij*gems_ab[h]+kl] = TEI(ii,kk,jj,ll,hik);
-
+        // packed index in Qmo_ of each active geminal pair P = INDEX(a,b)
+        long int * pair_index = (long int*)malloc(npair*sizeof(long int));
+        for (int a = 0; a < amo_; a++) {
+            for (int b = 0; b <= a; b++) {
+                pair_index[INDEX(a,b)] =
+                    (long int)INDEX(full_basis[a],full_basis[b]);
             }
         }
-    }
 
-    for (int h = 0; h < nirrep_; h++) {
+        // gather active DF columns into a contiguous (npair x nQ) buffer
+        double * Bact = (double*)malloc((size_t)npair * (size_t)nQ_ * sizeof(double));
         #pragma omp parallel for schedule (static)
-        for (long int ij = 0; ij < gems_aa[h]; ij++) {
-            long int i = bas_aa_sym[h][ij][0];
-            long int j = bas_aa_sym[h][ij][1];
+        for (long int P = 0; P < npair; P++) {
+            double * row = Bact + P * nQ_;
+            long int pidx = pair_index[P];
+            for (long int Q = 0; Q < nQ_; Q++) {
+                row[Q] = Qmo_[pidx + Q * ngem_full];
+            }
+        }
 
-            long int ii = full_basis[i];
-            long int jj = full_basis[j];
+        // ERI_act(P,P') = sum_Q Bact(P,Q) Bact(P',Q)  (row-major npair x npair)
+        double * ERI_act = (double*)malloc((size_t)npair * (size_t)npair * sizeof(double));
+        C_DGEMM('n','t',(int)npair,(int)npair,(int)nQ_,1.0,Bact,(int)nQ_,Bact,(int)nQ_,0.0,ERI_act,(int)npair);
 
-            for (long int kl = 0; kl < gems_aa[h]; kl++) {
-                long int k = bas_aa_sym[h][kl][0];
-                long int l = bas_aa_sym[h][kl][1];
+        free(Bact);
 
-                long int kk = full_basis[k];
-                long int ll = full_basis[l];
+        // D2ab:  (ik|jl)
+        for (int h = 0; h < nirrep_; h++) {
+            #pragma omp parallel for schedule (static)
+            for (long int ij = 0; ij < gems_ab[h]; ij++) {
+                long int i = bas_ab_sym[h][ij][0];
+                long int j = bas_ab_sym[h][ij][1];
 
-                int hik = SymmetryPair(symmetry[i],symmetry[k]);
-                int hil = SymmetryPair(symmetry[i],symmetry[l]);
+                for (long int kl = 0; kl < gems_ab[h]; kl++) {
+                    long int k = bas_ab_sym[h][kl][0];
+                    long int l = bas_ab_sym[h][kl][1];
 
-                double dum1 = TEI(ii,kk,jj,ll,hik);
-                double dum2 = TEI(ii,ll,jj,kk,hil);
+                    c_p[d2aboff[h] + ij*gems_ab[h]+kl] =
+                        ERI_act[(long int)INDEX(i,k) * npair + (long int)INDEX(j,l)];
+                }
+            }
+        }
 
-                c_p[d2aaoff[h] + ij*gems_aa[h]+kl]    = dum1 - dum2;
-                c_p[d2bboff[h] + ij*gems_aa[h]+kl]    = dum1 - dum2;
+        // D2aa / D2bb:  (ik|jl) - (il|jk)
+        for (int h = 0; h < nirrep_; h++) {
+            #pragma omp parallel for schedule (static)
+            for (long int ij = 0; ij < gems_aa[h]; ij++) {
+                long int i = bas_aa_sym[h][ij][0];
+                long int j = bas_aa_sym[h][ij][1];
+
+                for (long int kl = 0; kl < gems_aa[h]; kl++) {
+                    long int k = bas_aa_sym[h][kl][0];
+                    long int l = bas_aa_sym[h][kl][1];
+
+                    double dum1 = ERI_act[(long int)INDEX(i,k) * npair + (long int)INDEX(j,l)];
+                    double dum2 = ERI_act[(long int)INDEX(i,l) * npair + (long int)INDEX(j,k)];
+
+                    c_p[d2aaoff[h] + ij*gems_aa[h]+kl]    = dum1 - dum2;
+                    c_p[d2bboff[h] + ij*gems_aa[h]+kl]    = dum1 - dum2;
+                }
+            }
+        }
+
+        free(ERI_act);
+        free(pair_index);
+
+    } else {
+
+        // conventional (4-index) integrals: read element-by-element from disk
+        for (int h = 0; h < nirrep_; h++) {
+            #pragma omp parallel for schedule (static)
+            for (long int ij = 0; ij < gems_ab[h]; ij++) {
+                long int i = bas_ab_sym[h][ij][0];
+                long int j = bas_ab_sym[h][ij][1];
+
+                long int ii = full_basis[i];
+                long int jj = full_basis[j];
+
+                for (long int kl = 0; kl < gems_ab[h]; kl++) {
+                    long int k = bas_ab_sym[h][kl][0];
+                    long int l = bas_ab_sym[h][kl][1];
+
+                    long int kk = full_basis[k];
+                    long int ll = full_basis[l];
+
+                    int hik = SymmetryPair(symmetry[i],symmetry[k]);
+
+                    c_p[d2aboff[h] + ij*gems_ab[h]+kl] = TEI(ii,kk,jj,ll,hik);
+
+                }
+            }
+        }
+
+        for (int h = 0; h < nirrep_; h++) {
+            #pragma omp parallel for schedule (static)
+            for (long int ij = 0; ij < gems_aa[h]; ij++) {
+                long int i = bas_aa_sym[h][ij][0];
+                long int j = bas_aa_sym[h][ij][1];
+
+                long int ii = full_basis[i];
+                long int jj = full_basis[j];
+
+                for (long int kl = 0; kl < gems_aa[h]; kl++) {
+                    long int k = bas_aa_sym[h][kl][0];
+                    long int l = bas_aa_sym[h][kl][1];
+
+                    long int kk = full_basis[k];
+                    long int ll = full_basis[l];
+
+                    int hik = SymmetryPair(symmetry[i],symmetry[k]);
+                    int hil = SymmetryPair(symmetry[i],symmetry[l]);
+
+                    double dum1 = TEI(ii,kk,jj,ll,hik);
+                    double dum2 = TEI(ii,ll,jj,kk,hil);
+
+                    c_p[d2aaoff[h] + ij*gems_aa[h]+kl]    = dum1 - dum2;
+                    c_p[d2bboff[h] + ij*gems_aa[h]+kl]    = dum1 - dum2;
+                }
             }
         }
     }

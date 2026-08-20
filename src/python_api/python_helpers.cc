@@ -68,6 +68,8 @@ void export_HilbertHelper(py::module& m) {
         .def("rho_b_x", &RealSpaceDensityHelper::rho_b_x)
         .def("rho_b_y", &RealSpaceDensityHelper::rho_b_y)
         .def("rho_b_z", &RealSpaceDensityHelper::rho_b_z)
+        .def("tau_a", &RealSpaceDensityHelper::tau_a)
+        .def("tau_b", &RealSpaceDensityHelper::tau_b)
         .def("xc_hole", &RealSpaceDensityHelper::xc_hole)
         .def("Da", &RealSpaceDensityHelper::Da)
         .def("Db", &RealSpaceDensityHelper::Db);
@@ -240,6 +242,18 @@ std::vector<double> RealSpaceDensityHelper::rho_b_y() {
 }
 std::vector<double> RealSpaceDensityHelper::rho_b_z() {
     std::shared_ptr<Vector> vec = real_space_density->rho_b_z();
+    double * vec_p = vec->pointer();
+    std::vector<double> return_val(vec_p,vec_p+vec->dim(0));
+    return return_val;
+}
+std::vector<double> RealSpaceDensityHelper::tau_a() {
+    std::shared_ptr<Vector> vec = real_space_density->tau_a();
+    double * vec_p = vec->pointer();
+    std::vector<double> return_val(vec_p,vec_p+vec->dim(0));
+    return return_val;
+}
+std::vector<double> RealSpaceDensityHelper::tau_b() {
+    std::shared_ptr<Vector> vec = real_space_density->tau_b();
     double * vec_p = vec->pointer();
     std::vector<double> return_val(vec_p,vec_p+vec->dim(0));
     return return_val;

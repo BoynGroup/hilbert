@@ -172,7 +172,7 @@ void v2RDM_DOCISolver::ReadOrbitalsFromCheckpointFile() {
             }
             if ( cp[mumax][i] * tempCa->pointer(h)[mumax][i] < 0.0 ) {
                 for (int j = 0; j < nmopi_[h]; j++) {
-                    np[j][i] *= -1;
+                    np[i][j] *= -1;
                 }
             }
         }

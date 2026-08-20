@@ -14,7 +14,7 @@ symmetry c1
 
 set {
   basis sto-3g 
-  scf_type df 
+  scf_type disk_df 
   e_convergence 1e-10
   d_convergence 1e-10 
 } 

@@ -36,6 +36,14 @@ module focas_driver
 
   implicit none
 
+  logical, save  :: focas_step_memory_valid_ = .false.
+  integer, save  :: focas_step_memory_nirrep_ = -1
+  integer, save  :: focas_step_memory_nmo_ = -1
+  integer, save  :: focas_step_memory_nrot_ = -1
+  integer, save  :: focas_step_memory_df_ = -1
+  integer, save  :: focas_step_memory_alg_ = -1
+  real(wp), save :: focas_step_memory_factor_ = 1.0_wp
+  
   contains
 
   subroutine focas_optimize(mo_coeff,int1,nnz_int1,int2,nnz_int2,den1,nnz_den1,den2,nnz_den2,    &
@@ -52,7 +60,7 @@ module focas_driver
     integer, intent(in)     :: nactpi(nirrep)  ! number of active orbitals per irrep
     integer, intent(in)     :: nextpi(nirrep)  ! number of virtual orbitals per irrep (excluding forzen virtual orbitals) 
     ! real input
-    real(wp), intent(inout) :: orbopt_data(15) ! input/output array
+    real(wp), intent(inout) :: orbopt_data(25) ! input/output array
     real(wp), intent(inout) :: mo_coeff(:,:)   ! mo coefficient matrix
     real(wp), intent(in)    :: int1(nnz_int1)  ! nonzero 1-e integral matrix elements
     real(wp), intent(in)    :: int2(nnz_int2)  ! nonzero 2-e integral matrix elements 
@@ -63,8 +71,9 @@ module focas_driver
     ! step size control parameters
     real(wp), parameter     :: r_increase_tol=0.75_wp  ! dE ratio above which step size is increased
     real(wp), parameter     :: r_decrease_tol=0.25_wp  ! dE ratio below which step size is reduced
-    real(wp), parameter     :: r_increase_fac=1.20_wp  ! factor by which to increase step size
-    real(wp), parameter     :: r_decrease_fac=0.70_wp  ! factor by which to reduce the step size 
+    real(wp), parameter     :: default_r_increase_fac=2.00_wp  ! default step-size growth factor
+    real(wp), parameter     :: r_decrease_fac=0.50_wp  ! factor by which to reduce the step size 
+    real(wp), parameter     :: min_step_size=1.0e-8_wp ! lower bound for trial orbital rotations
 
     ! quadratic model variables
     real(wp) :: coeff_a,coeff_b,coeff_c
@@ -74,6 +83,12 @@ module focas_driver
 
     ! timing variables
     real(wp) :: t0(2),t1(2),t_ene,t_gh,t_exp,t_wall_trans,t_cpu_trans,t_wall_aux,t_cpu_aux
+    real(wp) :: t_wall_exp,t_cpu_exp,t_wall_energy,t_cpu_energy
+    real(wp) :: t_wall_gradient,t_cpu_gradient,t_wall_hessian,t_cpu_hessian
+    real(wp) :: t_wall_oei,t_cpu_oei,t_wall_tei,t_cpu_tei,t_wall_mocoeff,t_cpu_mocoeff
+    real(wp) :: t_wall_grad_fi_coul,t_wall_grad_fi_exch
+    real(wp) :: t_wall_grad_fa_coul,t_wall_grad_fa_exch
+    real(wp) :: t_wall_grad_q,t_wall_grad_z,t_wall_grad_assemble
 
     ! iteration variables
     real(wp) :: current_energy,last_energy,delta_energy,gradient_norm_tolerance,delta_energy_tolerance
@@ -83,6 +98,10 @@ module focas_driver
     ! variables for trust radius
     integer :: evaluate_gradient,reject
     real(wp) :: step_size,step_size_update,step_size_factor,e_new,e_init,de_ratio,e_tmp
+    real(wp) :: r_increase_fac
+    real(wp) :: accepted_step_size
+    integer  :: trial_transforms
+    character(len=16) :: step_memory_source
     character :: reject_char(1)
 
     ! other variables
@@ -100,6 +119,17 @@ module focas_driver
     max_iter                    = int(orbopt_data(9)) 
     df_vars_%use_df_teints      = int(orbopt_data(10))
     alg                         = int(orbopt_data(15))
+    focas_step_memory_enabled_  = int(orbopt_data(16))
+    focas_df_c1_blocked_enabled_= int(orbopt_data(17))
+    focas_df_c1_block_q_        = int(orbopt_data(18))
+    focas_df_c1_block_memory_mib_= max(0,int(orbopt_data(19)))
+    focas_df_c1_block_q_max_    = max(1,int(orbopt_data(20)))
+    r_increase_fac              = orbopt_data(21)
+    if (r_increase_fac <= 0.0_wp) r_increase_fac = default_r_increase_fac
+    focas_df_c1_cuda_enabled_   = int(orbopt_data(22))
+    focas_df_c1_cuda_validate_  = int(orbopt_data(23))
+    focas_df_c1_cuda_num_gpus_  = int(orbopt_data(24))
+    focas_df_c1_cuda_verbose_   = int(orbopt_data(25))
 
     if ( log_print_ == 1 ) then
       inquire(file=fname,exist=fexist)
@@ -108,6 +138,11 @@ module focas_driver
       else
         open(fid_,file=fname,status='new')
       endif
+      write(fid_,*)
+      write(fid_,'(a)') 'focas_run_begin'
+      write(fid_,'(a,4(1x,i6))') 'focas_cuda_config enabled validate num_gpus verbose', &
+           focas_df_c1_cuda_enabled_,focas_df_c1_cuda_validate_, &
+           focas_df_c1_cuda_num_gpus_,focas_df_c1_cuda_verbose_
     endif
 
     ! calculate the total number of orbitals in space
@@ -159,27 +194,73 @@ module focas_driver
 
     ! initialize trust radius variables
     evaluate_gradient = 1
-    step_size_factor  = 1.0_wp
+    if ( focas_step_memory_enabled() .and. focas_step_memory_matches(alg) ) then
+      step_size_factor   = max(min_step_size,min(1.0_wp,focas_step_memory_factor_))
+      step_memory_source = 'warm_start'
+    else
+      step_size_factor   = 1.0_wp
+      step_memory_source = 'default'
+    end if
+    accepted_step_size = step_size_factor
 
     if ( log_print_ == 1 ) then
 
       write(fid_,*)
 
-      write(fid_,'((a4,1x),(a16,1x),(a10),(2x),2(a10,1x),1(a4,1x),(a3,1x),(a9,1x),(a8,1x),2(a11,1x),2(a11,1x))') &
+      write(fid_,'(a,1x,a,1x,f8.3)') 'focas_step_memory',trim(step_memory_source),step_size_factor
+      write(fid_,'(a,1x,f8.3)') 'focas_step_increase_factor',r_increase_fac
+
+      write(fid_,'((a4,1x),(a16,1x),(a10),(2x),2(a10,1x),1(a4,1x),(a3,1x),(a9,1x),(a8,1x),2(a11,1x),2(a11,1x),(a5,1x),(a8,1x))') &
                 & 'iter','E(k)','dE','||g||','max|g|','type','sym','(i,j)','R_step',     &
-                & 'twall_trans','tcpu_trans','twall_aux','tcpu_other'
+                & 'twall_trans','tcpu_trans','twall_aux','tcpu_other','ntry','R_next'
 
       write(fid_,'(a)')('-----------------------------------------------------------------&
                        & -----------------------------------------------------------------')
+      write(fid_,'(a)') 'focas_detail columns: iter exp oei tei mocoeff energy gradient hessian aux_total trans_total'
+      write(fid_,'(a)') 'focas_gradient_detail columns: iter fi_coul fi_exch fa_coul fa_exch q z assemble total'
 
     end if
 
     ! calculate current energy and gradient
     ! frozen doubly occupied orbitals zeroed in gradient calculation
 
-    call compute_energy(int1,int2,den1,den2)
+    t_wall_energy = 0.0_wp
+    t_cpu_energy  = 0.0_wp
+    t_wall_gradient = 0.0_wp
+    t_cpu_gradient  = 0.0_wp
+    t_wall_hessian = 0.0_wp
+    t_cpu_hessian  = 0.0_wp
+    ! build GPU Fock matrices via orbital_gradient first, then derive energy cheaply
+    t0 = timer()
     call orbital_gradient(int1,int2,den1,den2)
+    t1 = timer()
+    t_wall_gradient = t1(1) - t0(1)
+    t_cpu_gradient  = t1(2) - t0(2)
+    t_wall_grad_fi_coul = focas_gradient_fi_coul_wall_
+    t_wall_grad_fi_exch = focas_gradient_fi_exch_wall_
+    t_wall_grad_fa_coul = focas_gradient_fa_coul_wall_
+    t_wall_grad_fa_exch = focas_gradient_fa_exch_wall_
+    t_wall_grad_q = focas_gradient_q_wall_
+    t_wall_grad_z = focas_gradient_z_wall_
+    t_wall_grad_assemble = focas_gradient_assemble_wall_
+    t0 = timer()
+    e_total_ = compute_energy_tindex(fock_i_%occ, fock_a_%occ, q_, z_, int1, den1)
+    t1 = timer()
+    t_wall_energy = t1(1) - t0(1)
+    t_cpu_energy  = t1(2) - t0(2)
+    t0 = timer()
     call diagonal_hessian(q_,z_,int2,den1,den2)
+    t1 = timer()
+    t_wall_hessian = t1(1) - t0(1)
+    t_cpu_hessian  = t1(2) - t0(2)
+    if ( log_print_ == 1 ) then
+      write(fid_,'(a,1x,3(1x,f11.3))') 'focas_initial_detail energy gradient hessian', &
+           t_wall_energy,t_wall_gradient,t_wall_hessian
+      write(fid_,'(a,7(1x,f11.3),1x,f11.3)') 'focas_initial_gradient_detail', &
+           t_wall_grad_fi_coul,t_wall_grad_fi_exch,t_wall_grad_fa_coul, &
+           t_wall_grad_fa_exch,t_wall_grad_q,t_wall_grad_z, &
+           t_wall_grad_assemble,t_wall_gradient
+    end if
 
     initial_energy = e_total_
     last_energy    = e_total_
@@ -219,18 +300,74 @@ module focas_driver
 
       ! compute the step and determine the steplength
 
-      alpha = 1.0_wp
+      alpha = max(min_step_size,min(1.0_wp,step_size_factor))
+      trial_transforms = 1
       sk_ = alpha*dk_
+      t_wall_trans = 0.0_wp
+      t_cpu_trans  = 0.0_wp
+      t_wall_aux   = 0.0_wp
+      t_cpu_aux    = 0.0_wp
+      t_wall_exp   = 0.0_wp
+      t_cpu_exp    = 0.0_wp
+      t_wall_energy = 0.0_wp
+      t_cpu_energy  = 0.0_wp
+      t_wall_gradient = 0.0_wp
+      t_cpu_gradient  = 0.0_wp
+      t_wall_hessian = 0.0_wp
+      t_cpu_hessian  = 0.0_wp
+      t_wall_oei     = 0.0_wp
+      t_cpu_oei      = 0.0_wp
+      t_wall_tei     = 0.0_wp
+      t_cpu_tei      = 0.0_wp
+      t_wall_mocoeff = 0.0_wp
+      t_cpu_mocoeff  = 0.0_wp
+      t_wall_grad_fi_coul = 0.0_wp
+      t_wall_grad_fi_exch = 0.0_wp
+      t_wall_grad_fa_coul = 0.0_wp
+      t_wall_grad_fa_exch = 0.0_wp
+      t_wall_grad_q = 0.0_wp
+      t_wall_grad_z = 0.0_wp
+      t_wall_grad_assemble = 0.0_wp
 
       ! compute transformation matrix
+      t0 = timer()
       call compute_exponential(sk_)
+      t1 = timer()
+      t_wall_aux = t_wall_aux + t1(1) - t0(1)
+      t_cpu_aux  = t_cpu_aux  + t1(2) - t0(2)
+      t_wall_exp = t_wall_exp + t1(1) - t0(1)
+      t_cpu_exp  = t_cpu_exp  + t1(2) - t0(2)
 
       ! transform the integrals; xk = xk+alpha*dk
+      t0 = timer()
       call transform_driver(int1,int2,mo_coeff)
-      
-      ! calculate the current energy
+      t1 = timer()
+      t_wall_trans = t_wall_trans + t1(1) - t0(1)
+      t_cpu_trans  = t_cpu_trans  + t1(2) - t0(2)
+      t_wall_oei     = t_wall_oei     + focas_transform_oei_wall_
+      t_cpu_oei      = t_cpu_oei      + focas_transform_oei_cpu_
+      t_wall_tei     = t_wall_tei     + focas_transform_tei_wall_
+      t_cpu_tei      = t_cpu_tei      + focas_transform_tei_cpu_
+      t_wall_mocoeff = t_wall_mocoeff + focas_transform_mocoeff_wall_
+      t_cpu_mocoeff  = t_cpu_mocoeff  + focas_transform_mocoeff_cpu_
 
-      call compute_energy(int1,int2,den1,den2)
+      ! calculate gradient (builds GPU Fock matrices) then derive energy from them
+
+      t0 = timer()
+      call orbital_gradient(int1,int2,den1,den2)
+      t1 = timer()
+      t_wall_aux = t_wall_aux + t1(1) - t0(1)
+      t_cpu_aux  = t_cpu_aux  + t1(2) - t0(2)
+      t_wall_gradient = t_wall_gradient + t1(1) - t0(1)
+      t_cpu_gradient  = t_cpu_gradient  + t1(2) - t0(2)
+      t_wall_grad_fi_coul = t_wall_grad_fi_coul + focas_gradient_fi_coul_wall_
+      t_wall_grad_fi_exch = t_wall_grad_fi_exch + focas_gradient_fi_exch_wall_
+      t_wall_grad_fa_coul = t_wall_grad_fa_coul + focas_gradient_fa_coul_wall_
+      t_wall_grad_fa_exch = t_wall_grad_fa_exch + focas_gradient_fa_exch_wall_
+      t_wall_grad_q = t_wall_grad_q + focas_gradient_q_wall_
+      t_wall_grad_z = t_wall_grad_z + focas_gradient_z_wall_
+      t_wall_grad_assemble = t_wall_grad_assemble + focas_gradient_assemble_wall_
+      e_total_ = compute_energy_tindex(fock_i_%occ, fock_a_%occ, q_, z_, int1, den1)
 
       ! finish quadratic model
 
@@ -242,9 +379,8 @@ module focas_driver
 
       if (e_total_ <= coeff_c + 1e-4*alpha*coeff_b) then
 
-        ! The step satisfies the Armijo condition
-
-        call orbital_gradient(int1,int2,den1,den2)
+        ! The step satisfies the Armijo condition; gradient already computed above
+        step_size_factor = min(1.0_wp,max(min_step_size,r_increase_fac*alpha))
 	! write(*,*), 'Decrse: ', coeff_a, coeff_b, coeff_c, alpha, e_total_, grad_norm_
 
       else if (coeff_a > 0.0_wp) then
@@ -252,37 +388,88 @@ module focas_driver
         ! The quadratic is strictly convex; the minimizer is -coeff_b / coeff_a
         ! To evaluate the function we need to step back alpha and step forward to
         ! the new value; the following does this and then fixes up the remaining entries
-        
-        alpha = -coeff_b / coeff_a - alpha
-        sk_ = alpha*sk_
 
-        ! compute transformation matrix
-        call compute_exponential(sk_)
+        step_size = max(min_step_size,min(1.0_wp,-coeff_b / coeff_a))
+        step_size_update = step_size - alpha
+        sk_ = step_size_update*dk_
 
-        ! transform the integrals; xk = xk+sk_
-        call transform_driver(int1,int2,mo_coeff)
+        if (abs(step_size_update) > 1.0e-12_wp) then
 
-        ! calculate the current energy
+          ! compute transformation matrix
+          t0 = timer()
+          call compute_exponential(sk_)
+          t1 = timer()
+          t_wall_aux = t_wall_aux + t1(1) - t0(1)
+          t_cpu_aux  = t_cpu_aux  + t1(2) - t0(2)
+          t_wall_exp = t_wall_exp + t1(1) - t0(1)
+          t_cpu_exp  = t_cpu_exp  + t1(2) - t0(2)
 
-        call compute_energy(int1,int2,den1,den2)
-        call orbital_gradient(int1,int2,den1,den2)
+          ! transform the integrals; xk = xk+sk_
+          t0 = timer()
+          call transform_driver(int1,int2,mo_coeff)
+          t1 = timer()
+          t_wall_trans = t_wall_trans + t1(1) - t0(1)
+          t_cpu_trans  = t_cpu_trans  + t1(2) - t0(2)
+          t_wall_oei     = t_wall_oei     + focas_transform_oei_wall_
+          t_cpu_oei      = t_cpu_oei      + focas_transform_oei_cpu_
+          t_wall_tei     = t_wall_tei     + focas_transform_tei_wall_
+          t_cpu_tei      = t_cpu_tei      + focas_transform_tei_cpu_
+          t_wall_mocoeff = t_wall_mocoeff + focas_transform_mocoeff_wall_
+          t_cpu_mocoeff  = t_cpu_mocoeff  + focas_transform_mocoeff_cpu_
+          trial_transforms = trial_transforms + 1
 
-        alpha = -coeff_b / coeff_a
+          ! calculate gradient and energy at the minimizer point
+          t0 = timer()
+          call orbital_gradient(int1,int2,den1,den2)
+          t1 = timer()
+          t_wall_aux = t_wall_aux + t1(1) - t0(1)
+          t_cpu_aux  = t_cpu_aux  + t1(2) - t0(2)
+          t_wall_gradient = t_wall_gradient + t1(1) - t0(1)
+          t_cpu_gradient  = t_cpu_gradient  + t1(2) - t0(2)
+          t_wall_grad_fi_coul = t_wall_grad_fi_coul + focas_gradient_fi_coul_wall_
+          t_wall_grad_fi_exch = t_wall_grad_fi_exch + focas_gradient_fi_exch_wall_
+          t_wall_grad_fa_coul = t_wall_grad_fa_coul + focas_gradient_fa_coul_wall_
+          t_wall_grad_fa_exch = t_wall_grad_fa_exch + focas_gradient_fa_exch_wall_
+          t_wall_grad_q = t_wall_grad_q + focas_gradient_q_wall_
+          t_wall_grad_z = t_wall_grad_z + focas_gradient_z_wall_
+          t_wall_grad_assemble = t_wall_grad_assemble + focas_gradient_assemble_wall_
+          e_total_ = compute_energy_tindex(fock_i_%occ, fock_a_%occ, q_, z_, int1, den1)
+
+        end if
+
+        alpha = step_size
         sk_ = alpha*dk_
+        step_size_factor = min(1.0_wp,max(min_step_size,r_increase_fac*alpha))
         if (e_total_ <= coeff_c + 1e-4*alpha*coeff_b) then
           ! write(*,*), 'CnvexG: ', coeff_a, coeff_b, coeff_c, alpha, e_total_, grad_norm_
-        else 
+        else
           ! write(*,*), 'CnvexB: ', coeff_a, coeff_b, coeff_c, alpha, e_total_, grad_norm_
         end if
       else
-        call orbital_gradient(int1,int2,den1,den2)
+        ! Concave — gradient already computed at trial step above
+        step_size_factor = max(min_step_size,r_decrease_fac*alpha)
 	! write(*,*), 'Cncave: ', coeff_a, coeff_b, coeff_c, alpha, e_total_, grad_norm_
       end if
 
       e_new = e_total_
       delta_energy = e_new - e_init
+      accepted_step_size = alpha
       
       iter = iter + 1
+      if ( log_print_ == 1 ) then
+        write(fid_, &
+             '(i4,1x,f16.8,1x,es10.3,2x,2(es10.3,1x),a4,1x,a3,1x,a9,1x,f8.3,4(1x,f11.3),1x,i5,1x,f8.3)') &
+             iter,e_total_,delta_energy,grad_norm_,maxval(abs(orbital_gradient_)), &
+             'step','-','-',alpha,t_wall_trans,t_cpu_trans,t_wall_aux,t_cpu_aux, &
+             trial_transforms,step_size_factor
+        write(fid_,'(a,1x,i4,9(1x,f11.3))') 'focas_detail',iter, &
+             t_wall_exp,t_wall_oei,t_wall_tei,t_wall_mocoeff, &
+             t_wall_energy,t_wall_gradient,t_wall_hessian,t_wall_aux,t_wall_trans
+        write(fid_,'(a,1x,i4,8(1x,f11.3))') 'focas_gradient_detail',iter, &
+             t_wall_grad_fi_coul,t_wall_grad_fi_exch, &
+             t_wall_grad_fa_coul,t_wall_grad_fa_exch, &
+             t_wall_grad_q,t_wall_grad_z,t_wall_grad_assemble,t_wall_gradient
+      end if
       if (( abs(delta_energy) <= delta_energy_tolerance ) .and. (grad_norm_ <= gradient_norm_tolerance)) then
         converged = 1
         exit
@@ -386,6 +573,15 @@ module focas_driver
     orbopt_data(12) = grad_norm_
     orbopt_data(13) = last_energy - initial_energy
     orbopt_data(14) = real(converged,kind=wp)
+    if ( focas_step_memory_enabled() .and. iter > 0 ) then
+      focas_step_memory_factor_ = max(min_step_size,min(1.0_wp,accepted_step_size))
+      focas_step_memory_nirrep_ = nirrep_
+      focas_step_memory_nmo_    = nmo_tot_
+      focas_step_memory_nrot_   = rot_pair_%n_tot
+      focas_step_memory_df_     = df_vars_%use_df_teints
+      focas_step_memory_alg_    = alg
+      focas_step_memory_valid_  = .true.
+    end if
 
     ! deallocate indexing arrays
     call deallocate_indexing_arrays()
@@ -401,6 +597,37 @@ module focas_driver
     return
 
   end subroutine focas_optimize
+
+  logical function focas_step_memory_enabled()
+
+    implicit none
+
+    focas_step_memory_enabled = (focas_step_memory_enabled_ /= 0)
+
+    return
+
+  end function focas_step_memory_enabled
+
+  logical function focas_step_memory_matches(alg)
+
+    implicit none
+
+    integer, intent(in) :: alg
+
+    focas_step_memory_matches = .false.
+
+    if ( .not. focas_step_memory_valid_ ) return
+    if ( focas_step_memory_nirrep_ /= nirrep_ ) return
+    if ( focas_step_memory_nmo_    /= nmo_tot_ ) return
+    if ( focas_step_memory_nrot_   /= rot_pair_%n_tot ) return
+    if ( focas_step_memory_df_     /= df_vars_%use_df_teints ) return
+    if ( focas_step_memory_alg_    /= alg ) return
+
+    focas_step_memory_matches = .true.
+
+    return
+
+  end function focas_step_memory_matches
 
   subroutine deallocate_final()
     implicit none

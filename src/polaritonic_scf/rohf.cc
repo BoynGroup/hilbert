@@ -69,7 +69,7 @@ void PolaritonicROHF::common_init() {
     same_a_b_dens_ = false;
 
     // ensure scf_type df
-    if ( options_.get_str("SCF_TYPE") != "DF" && options_.get_str("SCF_TYPE") != "CD" ) {
+    if ( (options_.get_str("SCF_TYPE") != "DF" && options_.get_str("SCF_TYPE") != "DISK_DF" && options_.get_str("SCF_TYPE") != "MEM_DF") && options_.get_str("SCF_TYPE") != "CD" ) {
         throw PsiException("polaritonic rohf only works with scf_type df for now",__FILE__,__LINE__);
     }
 
@@ -110,7 +110,7 @@ double PolaritonicROHF::compute_energy() {
     std::shared_ptr<JK> jk;
 
     int nQ = 0;
-    if ( options_.get_str("SCF_TYPE") == "DF" ) {
+    if ( (options_.get_str("SCF_TYPE") == "DF" || options_.get_str("SCF_TYPE") == "DISK_DF" || options_.get_str("SCF_TYPE") == "MEM_DF") ) {
 
         // get auxiliary basis:
         std::shared_ptr<BasisSet> auxiliary = reference_wavefunction_->get_basisset("DF_BASIS_SCF");
@@ -163,7 +163,7 @@ double PolaritonicROHF::compute_energy() {
 
     outfile->Printf("\n");
     outfile->Printf("    No. basis functions:            %5i\n",nso_);
-    if ( options_.get_str("SCF_TYPE") == "DF" ) {
+    if ( (options_.get_str("SCF_TYPE") == "DF" || options_.get_str("SCF_TYPE") == "DISK_DF" || options_.get_str("SCF_TYPE") == "MEM_DF") ) {
         outfile->Printf("    No. auxiliary basis functions:  %5i\n",nQ);
     }else if ( options_.get_str("SCF_TYPE") == "CD" ) {
         outfile->Printf("    cholesky_tolerance:             %5le\n",options_.get_double("CHOLESKY_TOLERANCE"));

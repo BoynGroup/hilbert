@@ -79,7 +79,7 @@ void PolaritonicRCIS::common_init() {
     outfile->Printf( "        *******************************************************\n");
 
     // ensure scf_type df
-    if ( options_.get_str("SCF_TYPE") != "DF" && options_.get_str("SCF_TYPE") != "CD" ) {
+    if ( (options_.get_str("SCF_TYPE") != "DF" && options_.get_str("SCF_TYPE") != "DISK_DF" && options_.get_str("SCF_TYPE") != "MEM_DF") && options_.get_str("SCF_TYPE") != "CD" ) {
         throw PsiException("polaritonic rcis only works with scf_type df for now",__FILE__,__LINE__);
     }
 
@@ -100,7 +100,7 @@ void PolaritonicRCIS::common_init() {
     int v = nso_ - nalpha_;
 
     nQ_ = 0;
-    if ( options_.get_str("SCF_TYPE") == "DF" ) {
+    if ( (options_.get_str("SCF_TYPE") == "DF" || options_.get_str("SCF_TYPE") == "DISK_DF" || options_.get_str("SCF_TYPE") == "MEM_DF") ) {
 
         // get auxiliary basis:
         std::shared_ptr<BasisSet> auxiliary = reference_wavefunction_->get_basisset("DF_BASIS_SCF");

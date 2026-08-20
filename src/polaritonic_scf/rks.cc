@@ -71,7 +71,7 @@ void PolaritonicRKS::common_init() {
     outfile->Printf( "        *******************************************************\n");
 
     // check SCF type
-    if ( options_.get_str("SCF_TYPE") != "DF" && options_.get_str("SCF_TYPE") != "CD" && options_.get_str("SCF_TYPE") != "PK") {
+    if ( (options_.get_str("SCF_TYPE") != "DF" && options_.get_str("SCF_TYPE") != "DISK_DF" && options_.get_str("SCF_TYPE") != "MEM_DF") && options_.get_str("SCF_TYPE") != "CD" && options_.get_str("SCF_TYPE") != "PK") {
         throw PsiException("invalid SCF_TYPE for qed-rks",__FILE__,__LINE__);
     }
 
@@ -144,7 +144,7 @@ double PolaritonicRKS::compute_energy() {
     std::shared_ptr<JK> jk;
 
     int nQ = 0;
-    if ( options_.get_str("SCF_TYPE") == "DF" ) {
+    if ( (options_.get_str("SCF_TYPE") == "DF" || options_.get_str("SCF_TYPE") == "DISK_DF" || options_.get_str("SCF_TYPE") == "MEM_DF") ) {
 
         // get auxiliary basis:
         std::shared_ptr<BasisSet> auxiliary = reference_wavefunction_->get_basisset("DF_BASIS_SCF");
@@ -196,7 +196,7 @@ double PolaritonicRKS::compute_energy() {
 
     outfile->Printf("\n");
     outfile->Printf("    No. basis functions:            %5i\n",nso_);
-    if ( options_.get_str("SCF_TYPE") == "DF" ) {
+    if ( (options_.get_str("SCF_TYPE") == "DF" || options_.get_str("SCF_TYPE") == "DISK_DF" || options_.get_str("SCF_TYPE") == "MEM_DF") ) {
         outfile->Printf("    No. auxiliary basis functions:  %5i\n",nQ);
     }else if ( options_.get_str("SCF_TYPE") == "CD" ) {
         outfile->Printf("    cholesky_tolerance:             %5le\n",options_.get_double("CHOLESKY_TOLERANCE"));

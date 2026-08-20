@@ -8,9 +8,12 @@ def test_doci():
     #! 6-31g H2O DOCI Test 
 
     import psi4
+    psi4.core.clean()
+    psi4.core.clean_options()
 
     import sys
-    sys.path.insert(0, '../..')
+    import os
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
     import hilbert
 
     h2o = psi4.geometry("""
@@ -30,7 +33,7 @@ def test_doci():
 
     psi4.set_options({
       'basis': '6-31g',
-      'scf_type': 'df',
+      'scf_type': 'disk_df',
       'e_convergence': 1e-10,
       'r_convergence': 1e-8,
       'orbopt_gradient_convergence': 1e-6,
@@ -71,9 +74,12 @@ def test_pp2rdm():
     #! 6-31g H2O pp2RDM Test 
 
     import psi4
+    psi4.core.clean()
+    psi4.core.clean_options()
 
     import sys
-    sys.path.insert(0, '../..')
+    import os
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
     import hilbert
 
     h2o = psi4.geometry("""
@@ -93,7 +99,7 @@ def test_pp2rdm():
 
     psi4.set_options({
       'basis': '6-31g',
-      'scf_type': 'df', 'e_convergence': 1e-10,
+      'scf_type': 'disk_df', 'e_convergence': 1e-10,
       'r_convergence': 1e-8,
       'orbopt_gradient_convergence': 1e-6,
       'orbopt_energy_convergence': 1e-8,
@@ -134,9 +140,12 @@ def test_pccd():
     #! 6-31g H2O pCCD Test 
 
     import psi4
+    psi4.core.clean()
+    psi4.core.clean_options()
 
     import sys
-    sys.path.insert(0, '../..')
+    import os
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
     import hilbert
 
     h2o = psi4.geometry("""
@@ -156,7 +165,7 @@ def test_pccd():
 
     psi4.set_options({
       'basis': '6-31g',
-      'scf_type': 'df',
+      'scf_type': 'disk_df',
       'e_convergence': 1e-10,
       'r_convergence': 1e-8,
       'orbopt_gradient_convergence': 1e-6,
@@ -198,9 +207,12 @@ def test_v2rdm_doci():
     #! 6-31g H2O v2RDM-DOCI Test 
 
     import psi4
+    psi4.core.clean()
+    psi4.core.clean_options()
 
     import sys
-    sys.path.insert(0, '../..')
+    import os
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
     import hilbert
 
     h2o = psi4.geometry("""
@@ -220,19 +232,20 @@ def test_v2rdm_doci():
 
     psi4.set_options({
       'basis': '6-31g',
-      'scf_type': 'df',
+      'scf_type': 'disk_df',
       'e_convergence': 1e-4,
-      'r_convergence': 1e-6,
+      'r_convergence': 1e-5,
       'maxiter': 100000,
     })
     psi4.set_module_options('hilbert', {
-      'orbopt_maxiter': 20,
+      'orbopt_maxiter': 50,
       'localize_orbitals': True,
-      'noisy_orbitals': True,
+      'noisy_orbitals': False,
       'optimize_orbitals': True,
       'orbopt_gradient_convergence': 1e-6,
       'orbopt_energy_convergence': 1e-8,
-      'orbopt_frequency': 1000,
+      'orbopt_frequency': 500,
+      'positivity': 'dqg',
     })
 
     psi4.activate(h2o)
@@ -263,9 +276,12 @@ def test_v2rdm():
     print('        N2 / cc-pVDZ / DQG(6,6), scf_type = DF, rNN = 1.1 A')
 
     import psi4
+    psi4.core.clean()
+    psi4.core.clean_options()
 
     import sys
-    sys.path.insert(0, '../..')
+    import os
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
     import hilbert
 
     n2 = psi4.geometry("""
@@ -276,7 +292,7 @@ def test_v2rdm():
 
     psi4.set_options({
       'basis':           'cc-pvdz',
-      'scf_type':        'df',
+      'scf_type':        'disk_df',
       'd_convergence':   1e-10,
       'maxiter':         500,
       'restricted_docc': [ 2, 0, 0, 0, 0, 2, 0, 0 ],
@@ -312,8 +328,11 @@ def test_v2rdm():
     assert psi4.compare_values(refscf, psi4.variable("SCF TOTAL ENERGY"), 8, "SCF total energy")
     assert psi4.compare_values(refv2rdm, psi4.variable("CURRENT ENERGY"), 5, "v2RDM-CASSCF total energy")
 
-#test_doci()
-test_v2rdm()
-#test_pp2rdm()
-#test_pccd()
-#test_v2rdm()
+if __name__ == '__main__':
+    test_doci()
+    test_v2rdm()
+    test_pp2rdm()
+    test_pccd()
+    test_v2rdm_doci()
+
+

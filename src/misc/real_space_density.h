@@ -73,11 +73,20 @@ class RealSpaceDensity: public Wavefunction{
     /// return xc hole on grid 
     std::shared_ptr<Vector> xc_hole(double x, double y, double z);
 
-    /// return on-top pair density (pi) on grid 
-    std::shared_ptr<Vector> pi() { 
+    /// return on-top pair density (pi) on grid
+    std::shared_ptr<Vector> pi() {
         BuildPiFast(tpdm_ab_);
-        return pi_; 
+        return pi_;
     }
+
+    /// enable/disable building the gradient of the on-top pair density (pi_x/pi_y/pi_z).
+    /// only needed by FULLY-translated (ft) functionals; off by default since the
+    /// translated functionals do not use grad(pi) and it is ~90% of BuildPiFast's cost.
+    void set_pi_gradient(bool flag) { do_pi_gradient_ = flag; }
+
+    /// magnitude below which OPDM/TPDM elements are skipped in the real-space
+    /// contractions. set to 0.0 for bit-for-bit-identical (unscreened) results.
+    void set_rdm_screening_tol(double tol) { rdm_screening_tol_ = tol; }
 
     /// return density (rho_a + rho_b) on grid 
     std::shared_ptr<Vector> rho() { return rho_; }
@@ -105,6 +114,12 @@ class RealSpaceDensity: public Wavefunction{
 
     /// return derivative of beta-spin density with respect to z on grid 
     std::shared_ptr<Vector> rho_b_z() { return rho_b_z_; }
+
+    /// return kinetic energy density (tau_a) on grid
+    std::shared_ptr<Vector> tau_a() { return tau_a_; }
+
+    /// return kinetic energy density (tau_b) on grid
+    std::shared_ptr<Vector> tau_b() { return tau_b_; }
 
     /// return the alpha opdm
     std::shared_ptr<Matrix> Da() { return Da_; }
@@ -137,6 +152,12 @@ class RealSpaceDensity: public Wavefunction{
 
   protected:
 
+    /// whether to also build the gradient of the on-top pair density (ft functionals)
+    bool do_pi_gradient_ = false;
+
+    /// magnitude threshold for screening OPDM/TPDM elements out of the grid contractions
+    double rdm_screening_tol_ = 1.0e-12;
+
     /// nonzero elements of alpha opdm
     std::vector<opdm> opdm_a_;
 
@@ -145,6 +166,11 @@ class RealSpaceDensity: public Wavefunction{
 
     /// nonzero elements of alpha-beta block of tpdm
     std::vector<tpdm> tpdm_ab_;
+
+    /// full-space (pitzer) indices of the active orbitals, as stored by WriteTPDM.
+    /// empty if unknown (e.g. tpdm provided via set_tpdm); BuildPiFast then falls
+    /// back to the fully scalar contraction.
+    std::vector<int> active_full_indices_;
 
     /// dft potential object
     std::shared_ptr<VBase> potential_;
@@ -251,8 +277,14 @@ class RealSpaceDensity: public Wavefunction{
     /// z-component of the gradient of the on-top pair density
     std::shared_ptr<Vector> pi_z_;
 
+    /// alpha-spin kinetic energy density
+    std::shared_ptr<Vector> tau_a_;
+
+    /// beta-spin kinetic energy density
+    std::shared_ptr<Vector> tau_b_;
+
     /// build on-top pair density using only non-zero elements of TPDM
-    void BuildPiFast(std::vector<tpdm> D2ab);
+    void BuildPiFast(const std::vector<tpdm> & D2ab);
 
     /// build exchange correlation hole
     void BuildExchangeCorrelationHole(size_t p);

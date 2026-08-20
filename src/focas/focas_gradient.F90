@@ -26,51 +26,223 @@
 
 module focas_gradient
   use focas_data
+  use iso_c_binding, only: c_int, c_long_long, c_double
  
   implicit none
+
+  interface
+    integer(c_int) function hilbert_focas_df_c1_cuda_fi_exchange(nmo,ndoc,nact,nQ,int2, &
+        fock_occ,fock_ext,q_chunk,max_devices,verbose) &
+        bind(C,name="hilbert_focas_df_c1_cuda_fi_exchange")
+      import :: c_int, c_long_long, c_double
+      integer(c_int), value       :: nmo
+      integer(c_int), value       :: ndoc
+      integer(c_int), value       :: nact
+      integer(c_long_long), value :: nQ
+      real(c_double), intent(in)  :: int2(*)
+      real(c_double)              :: fock_occ(*)
+      real(c_double)              :: fock_ext(*)
+      integer(c_int), value       :: q_chunk
+      integer(c_int), value       :: max_devices
+      integer(c_int), value       :: verbose
+    end function hilbert_focas_df_c1_cuda_fi_exchange
+
+    integer(c_int) function hilbert_focas_df_sym_cuda_fi_exchange(nmo,ndoc,nQ,int2, &
+        doc_df,c_out,q_chunk,max_devices,verbose) &
+        bind(C,name="hilbert_focas_df_sym_cuda_fi_exchange")
+      import :: c_int, c_long_long, c_double
+      integer(c_int), value       :: nmo
+      integer(c_int), value       :: ndoc
+      integer(c_long_long), value :: nQ
+      real(c_double), intent(in)  :: int2(*)
+      integer(c_int), intent(in)  :: doc_df(*)
+      real(c_double)              :: c_out(*)
+      integer(c_int), value       :: q_chunk
+      integer(c_int), value       :: max_devices
+      integer(c_int), value       :: verbose
+    end function hilbert_focas_df_sym_cuda_fi_exchange
+
+    integer(c_int) function hilbert_focas_df_sym_cuda_fa_exchange(nmo,ndoc,nact,nQ, &
+        int2,den1,act_df,c_out,q_chunk,max_devices,verbose) &
+        bind(C,name="hilbert_focas_df_sym_cuda_fa_exchange")
+      import :: c_int, c_long_long, c_double
+      integer(c_int), value       :: nmo
+      integer(c_int), value       :: ndoc
+      integer(c_int), value       :: nact
+      integer(c_long_long), value :: nQ
+      real(c_double), intent(in)  :: int2(*)
+      real(c_double), intent(in)  :: den1(*)
+      integer(c_int), intent(in)  :: act_df(*)
+      real(c_double)              :: c_out(*)
+      integer(c_int), value       :: q_chunk
+      integer(c_int), value       :: max_devices
+      integer(c_int), value       :: verbose
+    end function hilbert_focas_df_sym_cuda_fa_exchange
+
+    integer(c_int) function hilbert_focas_df_c1_cuda_fa_exchange(nmo,ndoc,nact,nQ,int2, &
+        den1,fock_occ,fock_ext,q_chunk,max_devices,verbose) &
+        bind(C,name="hilbert_focas_df_c1_cuda_fa_exchange")
+      import :: c_int, c_long_long, c_double
+      integer(c_int), value       :: nmo
+      integer(c_int), value       :: ndoc
+      integer(c_int), value       :: nact
+      integer(c_long_long), value :: nQ
+      real(c_double), intent(in)  :: int2(*)
+      real(c_double), intent(in)  :: den1(*)
+      real(c_double)              :: fock_occ(*)
+      real(c_double)              :: fock_ext(*)
+      integer(c_int), value       :: q_chunk
+      integer(c_int), value       :: max_devices
+      integer(c_int), value       :: verbose
+    end function hilbert_focas_df_c1_cuda_fa_exchange
+
+    integer(c_int) function hilbert_focas_df_c1_cuda_fi_coulomb(nmo,ndoc,nact,nQ, &
+        int1,int2,fock_occ,fock_ext,q_chunk,max_devices,verbose) &
+        bind(C,name="hilbert_focas_df_c1_cuda_fi_coulomb")
+      import :: c_int, c_long_long, c_double
+      integer(c_int), value       :: nmo
+      integer(c_int), value       :: ndoc
+      integer(c_int), value       :: nact
+      integer(c_long_long), value :: nQ
+      real(c_double), intent(in)  :: int1(*)
+      real(c_double), intent(in)  :: int2(*)
+      real(c_double)              :: fock_occ(*)
+      real(c_double)              :: fock_ext(*)
+      integer(c_int), value       :: q_chunk
+      integer(c_int), value       :: max_devices
+      integer(c_int), value       :: verbose
+    end function hilbert_focas_df_c1_cuda_fi_coulomb
+
+    integer(c_int) function hilbert_focas_df_c1_cuda_fa_coulomb(nmo,ndoc,nact,nQ, &
+        int2,den1,fock_occ,fock_ext,q_chunk,max_devices,verbose) &
+        bind(C,name="hilbert_focas_df_c1_cuda_fa_coulomb")
+      import :: c_int, c_long_long, c_double
+      integer(c_int), value       :: nmo
+      integer(c_int), value       :: ndoc
+      integer(c_int), value       :: nact
+      integer(c_long_long), value :: nQ
+      real(c_double), intent(in)  :: int2(*)
+      real(c_double), intent(in)  :: den1(*)
+      real(c_double)              :: fock_occ(*)
+      real(c_double)              :: fock_ext(*)
+      integer(c_int), value       :: q_chunk
+      integer(c_int), value       :: max_devices
+      integer(c_int), value       :: verbose
+    end function hilbert_focas_df_c1_cuda_fa_coulomb
+
+    integer(c_int) function hilbert_focas_df_c1_cuda_q(nmo,ndoc,nact,nQ,int2, &
+        den2,q,q_chunk,max_devices,verbose) bind(C,name="hilbert_focas_df_c1_cuda_q")
+      import :: c_int, c_long_long, c_double
+      integer(c_int), value       :: nmo
+      integer(c_int), value       :: ndoc
+      integer(c_int), value       :: nact
+      integer(c_long_long), value :: nQ
+      real(c_double), intent(in)  :: int2(*)
+      real(c_double), intent(in)  :: den2(*)
+      real(c_double)              :: q(*)
+      integer(c_int), value       :: q_chunk
+      integer(c_int), value       :: max_devices
+      integer(c_int), value       :: verbose
+    end function hilbert_focas_df_c1_cuda_q
+
+    integer(c_int) function hilbert_focas_df_sym_cuda_q(nmo,ndoc,nact,nQ,int2, &
+        scaled_d2,act_df,q,q_chunk,max_devices,verbose) &
+        bind(C,name="hilbert_focas_df_sym_cuda_q")
+      import :: c_int, c_long_long, c_double
+      integer(c_int), value       :: nmo
+      integer(c_int), value       :: ndoc
+      integer(c_int), value       :: nact
+      integer(c_long_long), value :: nQ
+      real(c_double), intent(in)  :: int2(*)
+      real(c_double), intent(in)  :: scaled_d2(*)
+      integer(c_int), intent(in)  :: act_df(*)
+      real(c_double)              :: q(*)
+      integer(c_int), value       :: q_chunk
+      integer(c_int), value       :: max_devices
+      integer(c_int), value       :: verbose
+    end function hilbert_focas_df_sym_cuda_q
+  end interface
 
   contains
 
   subroutine orbital_gradient(int1,int2,den1,den2)
     implicit none
     real(wp), intent(in) :: int1(:),int2(:),den1(:),den2(:)
-    real(wp) :: t0,t1
+    real(wp) :: t0(2),t1(2)
     type(fock_info) :: fock
     integer :: i
     real(wp), allocatable :: tq(:,:)
+
+    focas_gradient_fi_coul_wall_ = 0.0_wp
+    focas_gradient_fi_exch_wall_ = 0.0_wp
+    focas_gradient_fa_coul_wall_ = 0.0_wp
+    focas_gradient_fa_exch_wall_ = 0.0_wp
+    focas_gradient_q_wall_ = 0.0_wp
+    focas_gradient_z_wall_ = 0.0_wp
+    focas_gradient_assemble_wall_ = 0.0_wp
    
     ! calculate inactive Fock matrix
     if ( df_vars_%use_df_teints == 0 ) then
+       t0 = timer()
        call compute_f_i(int1,int2)
+       t1 = timer()
+       focas_gradient_fi_coul_wall_ = t1(1) - t0(1)
     else
+      t0 = timer()
       call compute_f_i_df_coulomb(int1,int2)
+      t1 = timer()
+      focas_gradient_fi_coul_wall_ = t1(1) - t0(1)
+      t0 = timer()
       call compute_f_i_df_exchange_fast(int2)
+      t1 = timer()
+      focas_gradient_fi_exch_wall_ = t1(1) - t0(1)
 !      call compute_f_i_df_exchange(int2)
     endif
     call transpose_matrix(fock_i_)
 
     ! calculate active Fock matrix
     if ( df_vars_%use_df_teints == 0 ) then
+      t0 = timer()
       call compute_f_a(den1,int2)
+      t1 = timer()
+      focas_gradient_fa_coul_wall_ = t1(1) - t0(1)
     else
+      t0 = timer()
       call compute_f_a_df_coulomb(den1,int2)
+      t1 = timer()
+      focas_gradient_fa_coul_wall_ = t1(1) - t0(1)
 !      call compute_f_a_df_exchange(den1,int2)
+      t0 = timer()
       call compute_f_a_df_exchange_fast(den1,int2)
+      t1 = timer()
+      focas_gradient_fa_exch_wall_ = t1(1) - t0(1)
     endif
     call transpose_matrix(fock_a_)
 
     ! calculate auxiliary q matrix
     if ( df_vars_%use_df_teints == 0 ) then
+      t0 = timer()
       call compute_q(den2,int2)
+      t1 = timer()
+      focas_gradient_q_wall_ = t1(1) - t0(1)
     else
+      t0 = timer()
       call compute_q_df(den2,int2)
+      t1 = timer()
+      focas_gradient_q_wall_ = t1(1) - t0(1)
     endif
 
     ! calculate auxiliary z matrix
+    t0 = timer()
     call compute_z(den1)
+    t1 = timer()
+    focas_gradient_z_wall_ = t1(1) - t0(1)
 
     ! compute gradient
+    t0 = timer()
     call compute_orbital_gradient()
+    t1 = timer()
+    focas_gradient_assemble_wall_ = t1(1) - t0(1)
 
 !    write(fid_,*)
 !    write(fid_,*)'F_i matrix'
@@ -92,6 +264,247 @@ module focas_gradient
 
     return
   end subroutine orbital_gradient
+
+  logical function use_c1_cuda_gradient_exchange()
+    implicit none
+
+    use_c1_cuda_gradient_exchange = .false.
+
+    if ( focas_df_c1_cuda_enabled_ == 0 ) then
+      call report_c1_cuda_gradient_exchange_skip('FOCAS C1 CUDA is disabled')
+      return
+    end if
+    if ( focas_df_c1_cuda_validate_ /= 0 ) then
+      call report_c1_cuda_gradient_exchange_skip('FOCAS C1 CUDA validation is enabled')
+      return
+    end if
+    if ( df_vars_%use_df_teints == 0 ) then
+      call report_c1_cuda_gradient_exchange_skip('DF two-electron integrals are disabled')
+      return
+    end if
+    if ( nirrep_ /= 1 ) then
+      call report_c1_cuda_gradient_exchange_skip('point group is not C1')
+      return
+    end if
+    if ( df_vars_%Qstride /= ngem_tot_ ) then
+      call report_c1_cuda_gradient_exchange_skip('DF integral layout is not Q-major')
+      return
+    end if
+    if ( nmo_tot_ <= 0 ) then
+      call report_c1_cuda_gradient_exchange_skip('there are no orbitals')
+      return
+    end if
+    if ( next_tot_ <= 0 ) then
+      call report_c1_cuda_gradient_exchange_skip('there are no external orbitals')
+      return
+    end if
+
+    use_c1_cuda_gradient_exchange = .true.
+    call report_c1_cuda_gradient_exchange_enabled()
+
+    return
+  end function use_c1_cuda_gradient_exchange
+
+  logical function use_sym_cuda_gradient_exchange()
+    ! Symmetry-general GPU Fi exchange. Same enabling conditions as the C1 path
+    ! but with no point-group restriction; the per-irrep Fock scatter is done on
+    ! the host from the dense df-order exchange matrix returned by the device.
+    implicit none
+
+    use_sym_cuda_gradient_exchange = .false.
+
+    if ( focas_df_c1_cuda_enabled_ == 0 ) return
+    if ( focas_df_c1_cuda_validate_ /= 0 ) return
+    if ( df_vars_%use_df_teints == 0 ) return
+    if ( df_vars_%Qstride /= ngem_tot_ ) return
+    if ( nmo_tot_ <= 0 ) return
+    if ( ndoc_tot_ <= 0 ) return
+
+    use_sym_cuda_gradient_exchange = .true.
+
+    return
+  end function use_sym_cuda_gradient_exchange
+
+  logical function use_c1_cuda_gradient_coulomb()
+    implicit none
+
+    use_c1_cuda_gradient_coulomb = .false.
+
+    if ( focas_df_c1_cuda_enabled_ == 0 ) then
+      call report_c1_cuda_gradient_coulomb_skip('FOCAS C1 CUDA is disabled')
+      return
+    end if
+    if ( focas_df_c1_cuda_validate_ /= 0 ) then
+      call report_c1_cuda_gradient_coulomb_skip('FOCAS C1 CUDA validation is enabled')
+      return
+    end if
+    if ( df_vars_%use_df_teints == 0 ) then
+      call report_c1_cuda_gradient_coulomb_skip('DF two-electron integrals are disabled')
+      return
+    end if
+    if ( nirrep_ /= 1 ) then
+      call report_c1_cuda_gradient_coulomb_skip('point group is not C1')
+      return
+    end if
+    if ( df_vars_%Qstride /= ngem_tot_ ) then
+      call report_c1_cuda_gradient_coulomb_skip('DF integral layout is not Q-major')
+      return
+    end if
+    if ( nmo_tot_ <= 0 ) then
+      call report_c1_cuda_gradient_coulomb_skip('there are no orbitals')
+      return
+    end if
+    if ( next_tot_ <= 0 ) then
+      call report_c1_cuda_gradient_coulomb_skip('there are no external orbitals')
+      return
+    end if
+
+    use_c1_cuda_gradient_coulomb = .true.
+    call report_c1_cuda_gradient_coulomb_enabled()
+
+    return
+  end function use_c1_cuda_gradient_coulomb
+
+  logical function use_c1_cuda_gradient_q()
+    implicit none
+
+    use_c1_cuda_gradient_q = .false.
+
+    if ( focas_df_c1_cuda_enabled_ == 0 ) then
+      call report_c1_cuda_gradient_q_skip('FOCAS C1 CUDA is disabled')
+      return
+    end if
+    if ( focas_df_c1_cuda_validate_ /= 0 ) then
+      call report_c1_cuda_gradient_q_skip('FOCAS C1 CUDA validation is enabled')
+      return
+    end if
+    if ( df_vars_%use_df_teints == 0 ) then
+      call report_c1_cuda_gradient_q_skip('DF two-electron integrals are disabled')
+      return
+    end if
+    if ( nirrep_ /= 1 ) then
+      call report_c1_cuda_gradient_q_skip('point group is not C1')
+      return
+    end if
+    if ( df_vars_%Qstride /= ngem_tot_ ) then
+      call report_c1_cuda_gradient_q_skip('DF integral layout is not Q-major')
+      return
+    end if
+    if ( nmo_tot_ <= 0 ) then
+      call report_c1_cuda_gradient_q_skip('there are no orbitals')
+      return
+    end if
+    if ( nact_tot_ <= 0 ) then
+      call report_c1_cuda_gradient_q_skip('there are no active orbitals')
+      return
+    end if
+
+    use_c1_cuda_gradient_q = .true.
+    call report_c1_cuda_gradient_q_enabled()
+
+    return
+  end function use_c1_cuda_gradient_q
+
+  logical function use_sym_cuda_gradient_q()
+    ! Symmetry-general GPU Q contraction. The scaled, symmetry-blocked 2-RDM and
+    ! the df-order active list are assembled on the host; the device runs the
+    ! same dense DGEMMs as the C1 path. No point-group restriction.
+    implicit none
+
+    use_sym_cuda_gradient_q = .false.
+
+    if ( focas_df_c1_cuda_enabled_ == 0 ) return
+    if ( focas_df_c1_cuda_validate_ /= 0 ) return
+    if ( df_vars_%use_df_teints == 0 ) return
+    if ( df_vars_%Qstride /= ngem_tot_ ) return
+    if ( nmo_tot_ <= 0 ) return
+    if ( nact_tot_ <= 0 ) return
+
+    use_sym_cuda_gradient_q = .true.
+
+    return
+  end function use_sym_cuda_gradient_q
+
+  subroutine report_c1_cuda_gradient_exchange_skip(reason)
+    implicit none
+    character(*), intent(in) :: reason
+    logical, save :: reported = .false.
+
+    if ( reported ) return
+    if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) then
+      write(fid_,'(a,1x,a)') 'focas_gradient_cuda_exchange disabled:',trim(reason)
+      reported = .true.
+    end if
+
+    return
+  end subroutine report_c1_cuda_gradient_exchange_skip
+
+  subroutine report_c1_cuda_gradient_exchange_enabled()
+    implicit none
+    logical, save :: reported = .false.
+
+    if ( reported ) return
+    if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) then
+      write(fid_,'(a)') 'focas_gradient_cuda_exchange enabled: C1 DF Fi/Fa exchange'
+      reported = .true.
+    end if
+
+    return
+  end subroutine report_c1_cuda_gradient_exchange_enabled
+
+  subroutine report_c1_cuda_gradient_coulomb_skip(reason)
+    implicit none
+    character(*), intent(in) :: reason
+    logical, save :: reported = .false.
+
+    if ( reported ) return
+    if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) then
+      write(fid_,'(a,1x,a)') 'focas_gradient_cuda_coulomb disabled:',trim(reason)
+      reported = .true.
+    end if
+
+    return
+  end subroutine report_c1_cuda_gradient_coulomb_skip
+
+  subroutine report_c1_cuda_gradient_coulomb_enabled()
+    implicit none
+    logical, save :: reported = .false.
+
+    if ( reported ) return
+    if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) then
+      write(fid_,'(a)') 'focas_gradient_cuda_coulomb enabled: C1 DF Fi/Fa Coulomb'
+      reported = .true.
+    end if
+
+    return
+  end subroutine report_c1_cuda_gradient_coulomb_enabled
+
+  subroutine report_c1_cuda_gradient_q_skip(reason)
+    implicit none
+    character(*), intent(in) :: reason
+    logical, save :: reported = .false.
+
+    if ( reported ) return
+    if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) then
+      write(fid_,'(a,1x,a)') 'focas_gradient_cuda_q disabled:',trim(reason)
+      reported = .true.
+    end if
+
+    return
+  end subroutine report_c1_cuda_gradient_q_skip
+
+  subroutine report_c1_cuda_gradient_q_enabled()
+    implicit none
+    logical, save :: reported = .false.
+
+    if ( reported ) return
+    if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) then
+      write(fid_,'(a)') 'focas_gradient_cuda_q enabled: C1 DF Q contraction'
+      reported = .true.
+    end if
+
+    return
+  end subroutine report_c1_cuda_gradient_q_enabled
 
   subroutine transpose_matrix(fock)
 
@@ -539,16 +952,126 @@ module focas_gradient
     integer :: p_class
     integer :: t,u,v,w,p,tu_den,vw_den,tuvw
     integer :: vdf,wdf,pdf,udf,den_off,den_ind,tu_int
+    integer :: cuda_status
     integer(ip) :: vw_df,pu_df,nQ
-  
+
     real(wp) :: val
+
+    ! symmetry-general GPU Q path scratch
+    real(wp), allocatable       :: scaled_d2_sym(:,:),q_df_tmp(:,:)
+    integer(c_int), allocatable :: act_df_list(:)
+    integer, allocatable        :: act_sym_l(:),act_class_l(:)
+    integer     :: ngem_act,ka,a_sym,ta,ua,va,wa,tc,uc,vc,wc
+    integer     :: vw_sym,tu_pack,vw_pack
+    integer(ip) :: den_ind_q
+    real(wp)    :: scale_vw
  
     nQ = int ( df_vars_%nQ , kind = ip )
 
     ! initialize
  
     q_ = 0.0_wp
- 
+
+    if ( use_c1_cuda_gradient_q() ) then
+      cuda_status = hilbert_focas_df_c1_cuda_q( &
+           int(nmo_tot_,kind=c_int),int(ndoc_tot_,kind=c_int), &
+           int(nact_tot_,kind=c_int),int(df_vars_%nQ,kind=c_long_long), &
+           int2,den2,q_(1,1),0,int(focas_df_c1_cuda_num_gpus_,kind=c_int), &
+           int(focas_df_c1_cuda_verbose_,kind=c_int))
+      if ( cuda_status == 0 ) return
+      if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) &
+           write(fid_,'(a,1x,i6)') 'focas_gradient_cuda_q_fallback status',cuda_status
+    end if
+
+    ! *********************************************************************
+    ! symmetry-general GPU Q contraction. Assemble the df-order active list
+    ! and the dense, symmetry-blocked scaled 2-RDM on the host, run the two
+    ! dense DGEMMs on the device, then remap the df-ordered result into q_.
+    ! *********************************************************************
+
+    if ( use_sym_cuda_gradient_q() ) then
+
+      ngem_act = nact_tot_ * ( nact_tot_ + 1 ) / 2
+
+      allocate(act_df_list(nact_tot_),act_sym_l(0:nact_tot_-1), &
+               act_class_l(0:nact_tot_-1))
+
+      ! active orbitals in class order (sym-major within the active block);
+      ! local active index ka (0-based) <-> the ka-th active orbital
+      ka = 0
+      do a_sym = 1 , nirrep_
+        do t = first_index_(a_sym,2) , last_index_(a_sym,2)
+          act_class_l(ka)     = t
+          act_sym_l(ka)       = a_sym
+          act_df_list(ka+1)   = int(df_vars_%class_to_df_map(t),kind=c_int)
+          ka = ka + 1
+        end do
+      end do
+
+      ! dense scaled 2-RDM in local active-pair packing: scaled_d2(vw,tu) =
+      ! scale(vw) * D(tu,vw), zero where sym(tu) /= sym(vw)
+      allocate(scaled_d2_sym(ngem_act,ngem_act))
+      scaled_d2_sym = 0.0_wp
+
+      do ta = 0 , nact_tot_ - 1
+        tc    = act_class_l(ta)
+        t_sym = act_sym_l(ta)
+        do ua = 0 , ta
+          uc      = act_class_l(ua)
+          u_sym   = act_sym_l(ua)
+          tu_pack = ta * ( ta + 1 ) / 2 + ua
+          tu_sym  = group_mult_tab_(t_sym,u_sym)
+          tu_den  = dens_%gemind(tc,uc)
+          den_off = dens_%offset(tu_sym)
+          do va = 0 , nact_tot_ - 1
+            vc    = act_class_l(va)
+            v_sym = act_sym_l(va)
+            do wa = 0 , va
+              wc    = act_class_l(wa)
+              w_sym = act_sym_l(wa)
+              vw_sym = group_mult_tab_(v_sym,w_sym)
+              if ( vw_sym /= tu_sym ) cycle
+              vw_pack   = va * ( va + 1 ) / 2 + wa
+              vw_den    = dens_%gemind(vc,wc)
+              den_ind_q = pq_index(tu_den,vw_den) + int(den_off,kind=ip)
+              if ( wa == va ) then
+                scale_vw = 1.0_wp
+              else
+                scale_vw = 2.0_wp
+              end if
+              scaled_d2_sym(vw_pack+1,tu_pack+1) = scale_vw * den2(den_ind_q)
+            end do
+          end do
+        end do
+      end do
+
+      allocate(q_df_tmp(nact_tot_,nmo_tot_))
+
+      cuda_status = hilbert_focas_df_sym_cuda_q( &
+           int(nmo_tot_,kind=c_int),int(ndoc_tot_,kind=c_int), &
+           int(nact_tot_,kind=c_int),int(df_vars_%nQ,kind=c_long_long), &
+           int2,scaled_d2_sym,act_df_list,q_df_tmp(1,1),0, &
+           int(focas_df_c1_cuda_num_gpus_,kind=c_int), &
+           int(focas_df_c1_cuda_verbose_,kind=c_int))
+
+      if ( cuda_status == 0 ) then
+        ! remap df-order orbital columns into class order
+        do p = 1 , nmo_tot_
+          pdf = df_vars_%class_to_df_map(p)
+          do ta = 1 , nact_tot_
+            q_(ta,p) = q_df_tmp(ta,pdf+1)
+          end do
+        end do
+        deallocate(scaled_d2_sym,q_df_tmp,act_df_list,act_sym_l,act_class_l)
+        return
+      end if
+
+      deallocate(scaled_d2_sym,q_df_tmp,act_df_list,act_sym_l,act_class_l)
+      if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) &
+           write(fid_,'(a,1x,i6)') 'focas_gradient_cuda_sym_q_fallback status',cuda_status
+
+    end if
+
     do tu_sym = 1 , nirrep_
 
       if ( dens_%ngempi(tu_sym) == 0 ) cycle
@@ -851,8 +1374,116 @@ module focas_gradient
     integer     :: pdf,tdf
     integer     :: nmo_p,nmo_t,nmo_q
     integer     :: pt_ind,qu_ind,tu_den
+    integer     :: cuda_status
     integer(ip) :: pt
     real(wp)    :: d_val
+
+    ! symmetry-general GPU Fa exchange scratch
+    real(wp), allocatable       :: c_sym(:),den1_act(:)
+    integer(c_int), allocatable :: act_df_list(:)
+    integer, allocatable        :: act_sym_l(:),act_class_l(:)
+    integer     :: ngem_act,ka,a_sym,ta,ua,tc,uc,nocc,qdf
+    integer(ip) :: c_ind
+
+    if ( use_c1_cuda_gradient_exchange() ) then
+      cuda_status = hilbert_focas_df_c1_cuda_fa_exchange( &
+           int(nmo_tot_,kind=c_int),int(ndoc_tot_,kind=c_int), &
+           int(nact_tot_,kind=c_int),int(df_vars_%nQ,kind=c_long_long), &
+           int2,den1,fock_a_%occ(1)%val(1,1),fock_a_%ext(1)%val(1), &
+           0,int(focas_df_c1_cuda_num_gpus_,kind=c_int), &
+           int(focas_df_c1_cuda_verbose_,kind=c_int))
+      if ( cuda_status == 0 ) return
+      if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) &
+           write(fid_,'(a,1x,i6)') 'focas_gradient_cuda_fa_exchange_fallback status',cuda_status
+    end if
+
+    ! *********************************************************************
+    ! symmetry-general GPU path: device returns the dense df-order matrix
+    ! C(pdf,qdf) = SUM_[t,u in A] (pdf t | qdf u) D1(t,u); scatter into the
+    ! per-irrep Fa blocks here (Fa -= 0.5 C), mirroring the CPU scatter below.
+    ! *********************************************************************
+
+    if ( use_sym_cuda_gradient_exchange() .and. nact_tot_ > 0 ) then
+
+      ngem_act = nact_tot_ * ( nact_tot_ + 1 ) / 2
+
+      allocate(act_df_list(nact_tot_),act_sym_l(0:nact_tot_-1), &
+               act_class_l(0:nact_tot_-1))
+
+      ka = 0
+      do a_sym = 1 , nirrep_
+        do t = first_index_(a_sym,2) , last_index_(a_sym,2)
+          act_class_l(ka)   = t
+          act_sym_l(ka)     = a_sym
+          act_df_list(ka+1) = int(df_vars_%class_to_df_map(t),kind=c_int)
+          ka = ka + 1
+        end do
+      end do
+
+      ! symmetry-blocked packed active 1-RDM (local active-pair packing);
+      ! D1(t,u) is zero unless sym(t) == sym(u)
+      allocate(den1_act(ngem_act))
+      den1_act = 0.0_wp
+      do ta = 0 , nact_tot_ - 1
+        tc    = act_class_l(ta)
+        t_sym = act_sym_l(ta)
+        do ua = 0 , ta
+          if ( act_sym_l(ua) /= t_sym ) cycle
+          uc = act_class_l(ua)
+          den1_act(ta*(ta+1)/2 + ua + 1) = den1(dens_%gemind(tc,uc))
+        end do
+      end do
+
+      allocate(c_sym(int(nmo_tot_,kind=ip)*int(nmo_tot_,kind=ip)))
+
+      cuda_status = hilbert_focas_df_sym_cuda_fa_exchange( &
+           int(nmo_tot_,kind=c_int),int(ndoc_tot_,kind=c_int), &
+           int(nact_tot_,kind=c_int),int(df_vars_%nQ,kind=c_long_long), &
+           int2,den1_act,act_df_list,c_sym,0, &
+           int(focas_df_c1_cuda_num_gpus_,kind=c_int), &
+           int(focas_df_c1_cuda_verbose_,kind=c_int))
+
+      if ( cuda_status == 0 ) then
+
+        do p_sym = 1 , nirrep_
+
+          nocc = ndocpi_(p_sym) + nactpi_(p_sym)
+
+          do q_class = 1 , 2
+            do q = first_index_(p_sym,q_class) , last_index_(p_sym,q_class)
+              q_i = trans_%class_to_irrep_map(q)
+              qdf = df_vars_%class_to_df_map(q)
+              do p_class = 1 , 3
+                do p = first_index_(p_sym,p_class) , last_index_(p_sym,p_class)
+                  p_i = trans_%class_to_irrep_map(p)
+                  if ( p_i < q_i ) cycle
+                  pdf = df_vars_%class_to_df_map(p)
+                  c_ind = int(pdf,kind=ip) + int(qdf,kind=ip)*int(nmo_tot_,kind=ip) + 1_ip
+                  fock_a_%occ(p_sym)%val(p_i,q_i) = fock_a_%occ(p_sym)%val(p_i,q_i) - 0.5_wp*c_sym(c_ind)
+                end do
+              end do
+            end do
+          end do
+
+          do p = first_index_(p_sym,3) , last_index_(p_sym,3)
+            p_i = trans_%class_to_irrep_map(p)
+            pdf = df_vars_%class_to_df_map(p)
+            c_ind = int(pdf,kind=ip) + int(pdf,kind=ip)*int(nmo_tot_,kind=ip) + 1_ip
+            fock_a_%ext(p_sym)%val(p_i - nocc) = fock_a_%ext(p_sym)%val(p_i - nocc) - 0.5_wp*c_sym(c_ind)
+          end do
+
+        end do
+
+        deallocate(act_df_list,act_sym_l,act_class_l,den1_act,c_sym)
+        return
+
+      end if
+
+      deallocate(act_df_list,act_sym_l,act_class_l,den1_act,c_sym)
+      if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) &
+           write(fid_,'(a,1x,i6)') 'focas_gradient_cuda_sym_fa_exchange_fallback status',cuda_status
+
+    end if
 
     ! allocate temporary scratch arrays to hold three-index integrals
     call allocate_fock_scr(fa_scr_,fa_scr_4index_,nactpi_,2)
@@ -1148,6 +1779,7 @@ module focas_gradient
     integer :: p_i,q_i
     integer(ip) :: tu_df,pq_df,qu_df,pt_df,nQ
     integer :: tdf,udf,pdf,qdf
+    integer :: cuda_status
 
     real(wp) :: val
 
@@ -1160,6 +1792,19 @@ module focas_gradient
       if ( allocated( fock_a_%ext(p_sym)%val ) ) fock_a_%ext(p_sym)%val = 0.0_wp
 
     end do
+
+    if ( use_c1_cuda_gradient_coulomb() ) then
+      cuda_status = hilbert_focas_df_c1_cuda_fa_coulomb( &
+           int(nmo_tot_,kind=c_int), int(ndoc_tot_,kind=c_int), &
+           int(nact_tot_,kind=c_int), int(df_vars_%nQ,kind=c_long_long), &
+           int2, den1, fock_a_%occ(1)%val(1,1), fock_a_%ext(1)%val(1), &
+           0, int(focas_df_c1_cuda_num_gpus_,kind=c_int), &
+           int(focas_df_c1_cuda_verbose_,kind=c_int))
+      if ( cuda_status == 0 ) return
+      if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) then
+        write(fid_,'(a,1x,i6)') 'focas_gradient_cuda_fa_coulomb_fallback status',cuda_status
+      end if
+    end if
 
     ! *** Coulomb terms ***
     
@@ -1633,6 +2278,7 @@ module focas_gradient
     integer :: p_class,q_class
     integer :: idf,pdf,qdf
     integer(ip) :: ii_df,pq_df,nQ
+    integer :: cuda_status
     real(wp) :: val
 
     nQ = int(df_vars_%nQ,kind=ip)
@@ -1644,6 +2290,19 @@ module focas_gradient
       if ( allocated( fock_i_%ext(p_sym)%val ) ) fock_i_%ext(p_sym)%val = 0.0_wp
 
     end do
+
+    if ( use_c1_cuda_gradient_coulomb() ) then
+      cuda_status = hilbert_focas_df_c1_cuda_fi_coulomb( &
+           int(nmo_tot_,kind=c_int), int(ndoc_tot_,kind=c_int), &
+           int(nact_tot_,kind=c_int), int(df_vars_%nQ,kind=c_long_long), &
+           int1, int2, fock_i_%occ(1)%val(1,1), fock_i_%ext(1)%val(1), &
+           0, int(focas_df_c1_cuda_num_gpus_,kind=c_int), &
+           int(focas_df_c1_cuda_verbose_,kind=c_int))
+      if ( cuda_status == 0 ) return
+      if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) then
+        write(fid_,'(a,1x,i6)') 'focas_gradient_cuda_fi_coulomb_fallback status',cuda_status
+      end if
+    end if
 
     qint_%tuQ(1)%val(:,1) = 0.0_wp
 
@@ -1903,8 +2562,95 @@ module focas_gradient
     integer :: nmo_p,nmo_i,nmo_q,ngem_pi,ngem_qi
     integer :: pi_s,qi_s,qi_ind,pi_ind
     integer(ip) :: pi,qi
-    integer     :: max_gen
+    integer     :: max_gen,cuda_status
     real(wp), allocatable :: pi_int(:,:),qi_int(:,:),fi_scr_4index(:,:)
+    real(wp), allocatable :: c_sym(:)
+    integer(c_int), allocatable :: doc_df_list(:)
+    integer     :: nocc,kdoc
+    integer(ip) :: c_ind
+
+    if ( use_c1_cuda_gradient_exchange() ) then
+      cuda_status = hilbert_focas_df_c1_cuda_fi_exchange( &
+           int(nmo_tot_,kind=c_int),int(ndoc_tot_,kind=c_int), &
+           int(nact_tot_,kind=c_int),int(df_vars_%nQ,kind=c_long_long), &
+           int2,fock_i_%occ(1)%val(1,1),fock_i_%ext(1)%val(1), &
+           0,int(focas_df_c1_cuda_num_gpus_,kind=c_int), &
+           int(focas_df_c1_cuda_verbose_,kind=c_int))
+      if ( cuda_status == 0 ) return
+      if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) &
+           write(fid_,'(a,1x,i6)') 'focas_gradient_cuda_fi_exchange_fallback status',cuda_status
+    end if
+
+    ! *********************************************************************
+    ! symmetry-general GPU path: device returns the dense df-order exchange
+    ! matrix C(pdf,qdf) = SUM_[i in D] (pdf i | qdf i); scatter it into the
+    ! per-irrep Fock blocks here (Fi -= C), mirroring the CPU scatter below.
+    ! *********************************************************************
+
+    if ( use_sym_cuda_gradient_exchange() ) then
+
+      ! df-order indices of the doubly-occupied (inner) orbitals
+      allocate(doc_df_list(ndoc_tot_))
+      kdoc = 0
+      do i_sym = 1 , nirrep_
+        do i = first_index_(i_sym,1) , last_index_(i_sym,1)
+          kdoc = kdoc + 1
+          doc_df_list(kdoc) = int(df_vars_%class_to_df_map(i),kind=c_int)
+        end do
+      end do
+
+      allocate(c_sym(int(nmo_tot_,kind=ip)*int(nmo_tot_,kind=ip)))
+
+      cuda_status = hilbert_focas_df_sym_cuda_fi_exchange( &
+           int(nmo_tot_,kind=c_int),int(ndoc_tot_,kind=c_int), &
+           int(df_vars_%nQ,kind=c_long_long),int2,doc_df_list,c_sym, &
+           0,int(focas_df_c1_cuda_num_gpus_,kind=c_int), &
+           int(focas_df_c1_cuda_verbose_,kind=c_int))
+
+      if ( cuda_status == 0 ) then
+
+        do p_sym = 1 , nirrep_
+
+          nocc = ndocpi_(p_sym) + nactpi_(p_sym)
+
+          ! occ columns (doc/active); rows over all classes, lower triangle of
+          ! occ-occ plus full ext-occ rows (p_i >= q_i)
+          do q_class = 1 , 2
+            do q = first_index_(p_sym,q_class) , last_index_(p_sym,q_class)
+              q_i = trans_%class_to_irrep_map(q)
+              qdf = df_vars_%class_to_df_map(q)
+              do p_class = 1 , 3
+                do p = first_index_(p_sym,p_class) , last_index_(p_sym,p_class)
+                  p_i = trans_%class_to_irrep_map(p)
+                  if ( p_i < q_i ) cycle
+                  pdf = df_vars_%class_to_df_map(p)
+                  c_ind = int(pdf,kind=ip) + int(qdf,kind=ip)*int(nmo_tot_,kind=ip) + 1_ip
+                  fock_i_%occ(p_sym)%val(p_i,q_i) = fock_i_%occ(p_sym)%val(p_i,q_i) - c_sym(c_ind)
+                end do
+              end do
+            end do
+          end do
+
+          ! external-external block: only diagonal elements are stored
+          do p = first_index_(p_sym,3) , last_index_(p_sym,3)
+            p_i = trans_%class_to_irrep_map(p)
+            pdf = df_vars_%class_to_df_map(p)
+            c_ind = int(pdf,kind=ip) + int(pdf,kind=ip)*int(nmo_tot_,kind=ip) + 1_ip
+            fock_i_%ext(p_sym)%val(p_i - nocc) = fock_i_%ext(p_sym)%val(p_i - nocc) - c_sym(c_ind)
+          end do
+
+        end do
+
+        deallocate(doc_df_list,c_sym)
+        return
+
+      end if
+
+      deallocate(doc_df_list,c_sym)
+      if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) &
+           write(fid_,'(a,1x,i6)') 'focas_gradient_cuda_sym_fi_exchange_fallback status',cuda_status
+
+    end if
 
     ! *************************
     ! allocate temporary arrays

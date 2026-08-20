@@ -89,7 +89,7 @@ void CC_Cavity::initialize() {
 
   /// grab dimensions
   // ensure scf_type df
-  if (options_.get_str("SCF_TYPE") != "DF" &&
+  if ((options_.get_str("SCF_TYPE") != "DF" && options_.get_str("SCF_TYPE") != "DISK_DF" && options_.get_str("SCF_TYPE") != "MEM_DF") &&
       options_.get_str("SCF_TYPE") != "CD") {
     throw PsiException("CC Cavity only works with scf_type df or cd for now",
                        __FILE__, __LINE__);
@@ -266,7 +266,7 @@ void CC_Cavity::init_integrals() {
 
   /// get number of auxiliary basis functions
 
-  if (options_.get_str("SCF_TYPE") == "DF") {
+  if ((options_.get_str("SCF_TYPE") == "DF" || options_.get_str("SCF_TYPE") == "DISK_DF" || options_.get_str("SCF_TYPE") == "MEM_DF")) {
     // get auxiliary basis:
     std::shared_ptr<BasisSet> auxiliary =
         reference_wavefunction_->get_basisset("DF_BASIS_CC");
@@ -285,7 +285,7 @@ void CC_Cavity::init_integrals() {
   /// initialize 3-index integral blocks
 
   /// fill 3-index integral blocks
-  if (options_.get_str("SCF_TYPE") == "DF") {
+  if ((options_.get_str("SCF_TYPE") == "DF" || options_.get_str("SCF_TYPE") == "DISK_DF" || options_.get_str("SCF_TYPE") == "MEM_DF")) {
     // get primary/auxiliary basis:
     std::shared_ptr<BasisSet> primary =
         reference_wavefunction_->get_basisset("ORBITAL");

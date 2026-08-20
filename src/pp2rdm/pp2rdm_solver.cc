@@ -91,7 +91,7 @@ void  pp2RDMSolver::common_init(){
 
     is_df_ = false;
 
-    if ( options_.get_str("SCF_TYPE") == "DF" || options_.get_str("SCF_TYPE") == "CD" ) {
+    if ( (options_.get_str("SCF_TYPE") == "DF" || options_.get_str("SCF_TYPE") == "DISK_DF" || options_.get_str("SCF_TYPE") == "MEM_DF") || options_.get_str("SCF_TYPE") == "CD" ) {
         is_df_ = true;
     }
 
@@ -380,7 +380,7 @@ void  pp2RDMSolver::common_init(){
 
     int nthread = omp_get_max_threads();
 
-    orbopt_data_    = (double*)malloc(15*sizeof(double));
+    orbopt_data_    = (double*)malloc(25*sizeof(double));
     orbopt_data_[0] = (double)nthread;
     orbopt_data_[1] = 1.0; // include active-active rotations
     orbopt_data_[2] = (double)nfrzc_; //(double)options_.get_int("ORBOPT_FROZEN_CORE");
@@ -411,6 +411,16 @@ void  pp2RDMSolver::common_init(){
     //else if ( options_.get_str("ORBOPT_ALGORITHM") == "DAI_YUAN" )         orbopt_data_[14] = 2.0;
     //else if ( options_.get_str("ORBOPT_ALGORITHM") == "HAGER_ZHANG" )      orbopt_data_[14] = 3.0;
     //else if ( options_.get_str("ORBOPT_ALGORITHM") == "KOU_DAI" )          orbopt_data_[14] = 4.0;
+    orbopt_data_[15] = 0.0;  // FOCAS step memory disabled for legacy callers
+    orbopt_data_[16] = 0.0;  // C1 blocked DF transform disabled
+    orbopt_data_[17] = 0.0;
+    orbopt_data_[18] = 0.0;
+    orbopt_data_[19] = 1.0;
+    orbopt_data_[20] = 2.0;  // historical FOCAS step growth factor
+    orbopt_data_[21] = 0.0;  // optional CUDA C1 DF transform disabled
+    orbopt_data_[22] = 0.0;
+    orbopt_data_[23] = 0.0;
+    orbopt_data_[24] = 0.0;
 
     orbopt_converged_ = false;
 

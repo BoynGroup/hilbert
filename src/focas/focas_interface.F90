@@ -48,7 +48,7 @@ subroutine focas_interface(mo_coeff_out,integrals_1,nnz_i1,integrals_2,nnz_i2,de
       & 7,8,5,6,3,4,1,2, &
       & 8,7,6,5,4,3,2,1  /), (/8,8/) )
 
-  real(wp) :: orbopt_data_io(15)
+  real(wp) :: orbopt_data_io(25)
   integer :: nirrep_in,ncore_in,nact_in,nvirt_in
   integer :: nnz_d1,nnz_d2,nnz_i1
   integer(ip) :: nnz_i2

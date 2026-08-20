@@ -61,7 +61,7 @@ OrbitalOptimizer::OrbitalOptimizer(std::shared_ptr<Wavefunction> reference_wavef
     frzvpi_ = reference_wavefunction->frzvpi();
     nmopi_  = reference_wavefunction->nmopi();
 
-    if ( reference_wavefunction->options().get_str("SCF_TYPE") == "DF" ) {
+    if ( (reference_wavefunction->options().get_str("SCF_TYPE") == "DF" || reference_wavefunction->options().get_str("SCF_TYPE") == "DISK_DF" || reference_wavefunction->options().get_str("SCF_TYPE") == "MEM_DF") ) {
         std::shared_ptr<BasisSet> primary = reference_wavefunction->basisset();
         std::shared_ptr<BasisSet> auxiliary = reference_wavefunction->get_basisset("DF_BASIS_SCF");
         nQ_ = auxiliary->nbf();

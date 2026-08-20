@@ -180,6 +180,7 @@ void v2RDMSolver::Q2_constraints_Au(double* A,double* u){
     C_DCOPY(blocksize_ab,u + d2aboff[0],1,A + offset,1);      // + D2(kl,ij)
     C_DAXPY(blocksize_ab,-1.0,u + q2aboff[0],1,A + offset,1); // - Q2(kl,ij)
     for (int h = 0; h < nirrep_; h++) {
+        const int row_offset = offset;
         #pragma omp parallel for schedule (static)
         for (int ij = 0; ij < gems_ab[h]; ij++) {
             int i = bas_ab_sym[h][ij][0];
@@ -199,7 +200,7 @@ void v2RDMSolver::Q2_constraints_Au(double* A,double* u){
             for (int kk = 0; kk < amopi_[hi]; kk++) {
                 int k  = kk + pitzer_offset[hi];
                 int kj = ibas_ab_sym[h][k][j];
-                A[offset + ij*gems_ab[h]+kj] -= u[d1aoff[hi] + kk*amopi_[hi]+ii]; // +Q1(k,i) djl
+                A[row_offset + ij*gems_ab[h]+kj] -= u[d1aoff[hi] + kk*amopi_[hi]+ii]; // +Q1(k,i) djl
             }
 
             // -D1(l,j) dik
@@ -208,7 +209,7 @@ void v2RDMSolver::Q2_constraints_Au(double* A,double* u){
             for (int ll = 0; ll < amopi_[hj]; ll++) {
                 int l  = ll + pitzer_offset[hj];
                 int il = ibas_ab_sym[h][i][l];
-                A[offset + ij*gems_ab[h]+il] -= u[d1boff[hj] + ll*amopi_[hj]+jj]; // -D1(l,j) dik
+                A[row_offset + ij*gems_ab[h]+il] -= u[d1boff[hj] + ll*amopi_[hj]+jj]; // -D1(l,j) dik
             }
         }
         offset += gems_ab[h]*gems_ab[h];
@@ -218,6 +219,7 @@ void v2RDMSolver::Q2_constraints_Au(double* A,double* u){
     C_DCOPY(blocksize_aa,u + d2aaoff[0],1,A + offset,1);      // + D2(kl,ij)
     C_DAXPY(blocksize_aa,-1.0,u + q2aaoff[0],1,A + offset,1); // - Q2(kl,ij)
     for (int h = 0; h < nirrep_; h++) {
+        const int row_offset = offset;
         #pragma omp parallel for schedule (static)
         for (int ij = 0; ij < gems_aa[h]; ij++) {
             int i = bas_aa_sym[h][ij][0];
@@ -258,7 +260,7 @@ void v2RDMSolver::Q2_constraints_Au(double* A,double* u){
                     int ll = l - pitzer_offset[h2];
                     dum        -=  u[d1aoff[h2] + ll*amopi_[h2]+jj];  // -D1(l,j) dkl
                 }
-                A[offset + ij*gems_aa[h]+kl] += dum;
+                A[row_offset + ij*gems_aa[h]+kl] += dum;
             }
         }
         offset += gems_aa[h]*gems_aa[h];
@@ -269,6 +271,7 @@ void v2RDMSolver::Q2_constraints_Au(double* A,double* u){
     C_DCOPY(blocksize_aa,u + d2bboff[0],1,A + offset,1);      // + D2(kl,ij)
     C_DAXPY(blocksize_aa,-1.0,u + q2bboff[0],1,A + offset,1); // - Q2(kl,ij)
     for (int h = 0; h < nirrep_; h++) {
+        const int row_offset = offset;
         #pragma omp parallel for schedule (static)
         for (int ij = 0; ij < gems_aa[h]; ij++) {
             int i = bas_aa_sym[h][ij][0];
@@ -309,7 +312,7 @@ void v2RDMSolver::Q2_constraints_Au(double* A,double* u){
                     int ll = l - pitzer_offset[h2];
                     dum        -=  u[d1boff[h2] + ll*amopi_[h2]+jj];  // -D1(l,j) dkl
                 }
-                A[offset + ij*gems_aa[h]+kl] += dum;
+                A[row_offset + ij*gems_aa[h]+kl] += dum;
             }
         }
         offset += gems_aa[h]*gems_aa[h];

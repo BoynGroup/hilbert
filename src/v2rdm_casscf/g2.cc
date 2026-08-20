@@ -246,6 +246,7 @@ void v2RDMSolver::G2_constraints_Au(double* A,double* u){
 
     // G2ab constraints:
     for (int h = 0; h < nirrep_; h++) {
+        const int row_offset = offset;
         #pragma omp parallel for schedule (static)
         for (int ijg = 0; ijg < gems_ab[h]; ijg++) {
 
@@ -273,13 +274,14 @@ void v2RDMSolver::G2_constraints_Au(double* A,double* u){
 
                 dum       -=  u[d2aboff[h2] + ild*gems_ab[h2]+kjd];   // - D2ab(il,kj)
 
-                A[offset + ijg*gems_ab[h]+klg] = dum;
+                A[row_offset + ijg*gems_ab[h]+klg] = dum;
             }
         }
         offset += gems_ab[h]*gems_ab[h];
     }
     // G2ba constraints:
     for (int h = 0; h < nirrep_; h++) {
+        const int row_offset = offset;
         #pragma omp parallel for schedule (static)
         for (int ijg = 0; ijg < gems_ab[h]; ijg++) {
 
@@ -306,13 +308,14 @@ void v2RDMSolver::G2_constraints_Au(double* A,double* u){
 
                 dum    -=  u[d2aboff[h2] + lid*gems_ab[h2]+jkd];       //   -D2ab(li,jk)
 
-                A[offset + ijg*gems_ab[h]+klg] = dum;
+                A[row_offset + ijg*gems_ab[h]+klg] = dum;
             }
         }
         offset += gems_ab[h]*gems_ab[h];
     }
     // G2aaaa / G2aabb / G2bbaa / G2bbbb
     for (int h = 0; h < nirrep_; h++) {
+        const int row_offset = offset;
         // G2aaaa
         #pragma omp parallel for schedule (static)
         for (int ijg = 0; ijg < gems_ab[h]; ijg++) {
@@ -347,7 +350,7 @@ void v2RDMSolver::G2_constraints_Au(double* A,double* u){
 
                 }
 
-                A[offset + ijg*2*gems_ab[h]+klg] = dum;
+                A[row_offset + ijg*2*gems_ab[h]+klg] = dum;
             }
         }
         // G2bbbb
@@ -384,7 +387,7 @@ void v2RDMSolver::G2_constraints_Au(double* A,double* u){
 
                 }
 
-                A[offset + (gems_ab[h] + ijg)*2*gems_ab[h] + (gems_ab[h] + klg)] = dum;
+                A[row_offset + (gems_ab[h] + ijg)*2*gems_ab[h] + (gems_ab[h] + klg)] = dum;
             }
         }
         // G2aabb
@@ -408,7 +411,7 @@ void v2RDMSolver::G2_constraints_Au(double* A,double* u){
 
                 dum       +=  u[d2aboff[h2] + ild*gems_ab[h2]+jkd]; // D2ab(il,jk)
 
-                A[offset + (ijg)*2*gems_ab[h] + (gems_ab[h] + klg)] = dum;
+                A[row_offset + (ijg)*2*gems_ab[h] + (gems_ab[h] + klg)] = dum;
             }
         }
         // G2bbaa
@@ -432,7 +435,7 @@ void v2RDMSolver::G2_constraints_Au(double* A,double* u){
 
                 dum       +=  u[d2aboff[h2] + lid*gems_ab[h2]+kjd]; // D2ab(li,kj)
 
-                A[offset + (gems_ab[h] + ijg)*2*gems_ab[h] + (klg)] = dum;
+                A[row_offset + (gems_ab[h] + ijg)*2*gems_ab[h] + (klg)] = dum;
             }
         }
         offset += 2*gems_ab[h]*2*gems_ab[h];
