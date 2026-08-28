@@ -422,8 +422,14 @@ void v2RDMSolver::common_init() {
   is_hubbard_ = options_.get_bool("HUBBARD_HAMILTONIAN");
 
 #ifdef USING_PCMSolver
-  E_pcm_ = 0.0;
-  Tr_D_Vpcm_ = 0.0;
+  E_solv_ = 0.0;
+  Tr_D_Vsolv_ = 0.0;
+  // Which implicit-solvent reaction field is active is detected lazily in the
+  // first update_solvent(), not here: PCM_enabled() only becomes valid after
+  // shallow_copy(reference_wavefunction_) runs later in common_init(), and the
+  // ddx attribute check needs a valid shared_from_this().
+  solvent_model_ = 0;
+  solvent_detected_ = false;
 #endif
 
   outfile->Printf("\n");
@@ -1792,7 +1798,7 @@ double v2RDMSolver::compute_energy() {
 
     print_header();
 #ifdef USING_PCMSolver
-    update_pcm();
+    update_solvent();
 #endif
     int capped_maxiter = capped_sdp_iterations(local_maxiter);
     if (capped_maxiter <= 0) {
@@ -1837,7 +1843,7 @@ double v2RDMSolver::compute_energy() {
 
     print_header();
 #ifdef USING_PCMSolver
-    update_pcm();
+    update_solvent();
 #endif
     int capped_maxiter = capped_sdp_iterations(local_maxiter);
     if (capped_maxiter <= 0) {
@@ -1929,9 +1935,9 @@ double v2RDMSolver::compute_energy() {
       double energy_primal = C_DDOT(n_primal_, c->pointer(), 1, x->pointer(), 1);
       double total_energy = energy_primal + enuc_ + efzc_;
 #ifdef USING_PCMSolver
-      if (PCM_enabled()) {
-        total_energy -= Tr_D_Vpcm_;
-        total_energy += E_pcm_;
+      if (solvent_enabled()) {
+        total_energy -= Tr_D_Vsolv_;
+        total_energy += E_solv_;
       }
 #endif
       outfile->Printf("            Total energy: %20.12lf\n", total_energy);
@@ -1954,9 +1960,9 @@ double v2RDMSolver::compute_energy() {
     double energy_primal = C_DDOT(n_primal_, c->pointer(), 1, x->pointer(), 1);
     double total_energy = energy_primal + enuc_ + efzc_;
 #ifdef USING_PCMSolver
-    if (PCM_enabled()) {
-      total_energy -= Tr_D_Vpcm_;
-      total_energy += E_pcm_;
+    if (solvent_enabled()) {
+      total_energy -= Tr_D_Vsolv_;
+      total_energy += E_solv_;
     }
 #endif
 
@@ -2006,9 +2012,9 @@ double v2RDMSolver::compute_energy() {
   double energy_primal = C_DDOT(n_primal_, c->pointer(), 1, x->pointer(), 1);
   energy_ = energy_primal + enuc_ + efzc_;
 #ifdef USING_PCMSolver
-  if (PCM_enabled()) {
-    energy_ -= Tr_D_Vpcm_;
-    energy_ += E_pcm_;
+  if (solvent_enabled()) {
+    energy_ -= Tr_D_Vsolv_;
+    energy_ += E_solv_;
   }
 #endif
 
@@ -2037,9 +2043,11 @@ double v2RDMSolver::compute_energy() {
     outfile->Printf("      Electron-Nuclear Potential Energy: %20.12lf\n",
                     potential);
 #ifdef USING_PCMSolver
-    if (PCM_enabled()) {
-      outfile->Printf("      PCM Polarization Energy:           %20.12lf\n",
-                      E_pcm_);
+    if (solvent_enabled()) {
+      const char *solv_label = (solvent_model_ == 2)
+                                   ? "DD Solvation Energy:               "
+                                   : "PCM Polarization Energy:           ";
+      outfile->Printf("      %s%20.12lf\n", solv_label, E_solv_);
     }
 #endif
   } else {
@@ -2067,9 +2075,9 @@ double v2RDMSolver::compute_energy() {
 
   double total_energy = energy_primal + enuc_ + efzc_;
 #ifdef USING_PCMSolver
-  if (PCM_enabled()) {
-    total_energy -= Tr_D_Vpcm_;
-    total_energy += E_pcm_;
+  if (solvent_enabled()) {
+    total_energy -= Tr_D_Vsolv_;
+    total_energy += E_solv_;
   }
 #endif
   outfile->Printf("\n");
@@ -2232,9 +2240,9 @@ double v2RDMSolver::compute_energy() {
 
   double final_energy = energy_primal + enuc_ + efzc_;
 #ifdef USING_PCMSolver
-  if (PCM_enabled()) {
-    final_energy -= Tr_D_Vpcm_;
-    final_energy += E_pcm_;
+  if (solvent_enabled()) {
+    final_energy -= Tr_D_Vsolv_;
+    final_energy += E_solv_;
   }
 #endif
 
@@ -2325,8 +2333,8 @@ void v2RDMSolver::EnergyByComponent(double &kinetic, double &potential,
     }
   }
 #ifdef USING_PCMSolver
-  if (PCM_enabled()) {
-    two_electron_energy -= Tr_D_Vpcm_;
+  if (solvent_enabled()) {
+    two_electron_energy -= Tr_D_Vsolv_;
   }
 #endif
 }
@@ -4196,20 +4204,12 @@ void v2RDMSolver::PackSpatialDensity() {
 
 #ifdef USING_PCMSolver
 
-void v2RDMSolver::update_pcm() {
-  if (!PCM_enabled())
-    return;
-  if (!T_ || !V_)
-    return;
+bool v2RDMSolver::solvent_enabled() const { return solvent_model_ != 0; }
 
-  // Get the python wavefunction object
-  py::object py_wfn = py::cast(this->shared_from_this());
-
-  // Get the python PCM object
-  py::object py_pcm = py_wfn.attr("get_PCM")();
-  if (py_pcm.is_none())
-    return;
-
+// Build the total (alpha+beta) density matrix in the SO/AO basis from the
+// current v2RDM 1-RDM, using the running orbital-optimization transformation.
+// Shared verbatim by every implicit-solvent model.
+std::shared_ptr<Matrix> v2RDMSolver::BuildTotalAODensity() {
   // 1. Reconstruct current MO coefficients (Ca_curr) using Ca_ and
   // orbopt_transformation_matrix_
   SharedMatrix temp(new Matrix("MO_Rotation", nmopi_, nmopi_));
@@ -4243,6 +4243,9 @@ void v2RDMSolver::update_pcm() {
   SharedMatrix Ca_curr(new Matrix("Ca_curr", nsopi_, nmopi_));
   Ca_curr->zero();
   Ca_curr->gemm(false, true, 1.0, Ca_, temp, 0.0);
+
+  // stash the current MO coefficients so ApplySolventPotential can reuse them
+  Ca_solvent_ = Ca_curr;
 
   // 2. Build the total alpha and beta density matrices in the MO basis
   SharedMatrix Da_MO(new Matrix("Da_MO", nmopi_, nmopi_));
@@ -4282,42 +4285,45 @@ void v2RDMSolver::update_pcm() {
   D_SO->zero();
   D_SO->add(Da_SO);
   D_SO->add(Db_SO);
+  return D_SO;
+}
 
-  // 4. Pass D_SO to PCMSolver and compute new PCM polarization energy and
-  // potential V_pcm
-  py::object calc_type = py::module_::import("psi4")
-                             .attr("core")
-                             .attr("PCM")
-                             .attr("CalcType")
-                             .attr("Total");
-  py::tuple pcm_terms = py_pcm.attr("compute_PCM_terms")(D_SO, calc_type);
-  E_pcm_ = pcm_terms[0].cast<double>();
-  SharedMatrix V_pcm = pcm_terms[1].cast<SharedMatrix>();
+// Fold a solvent reaction-field potential V_solv (SO basis) into the core
+// Hamiltonian and record the bookkeeping terms.  V_solv and E_solv must follow
+// the same convention Psi4's SCF uses for PCM/ddx: V_solv is the full effective
+// one-electron reaction-field operator, and E_solv is the solvation free energy
+// 1/2 Tr(D . V_solv).  The macro-iteration energy then removes the folded-in
+// linear term Tr(D . V_solv) and adds back E_solv (see the correction sites).
+// Shared verbatim by every implicit-solvent model.
+void v2RDMSolver::ApplySolventPotential(std::shared_ptr<Matrix> D_SO,
+                                        std::shared_ptr<Matrix> V_solv,
+                                        double E_solv) {
+  E_solv_ = E_solv;
 
-  // Compute trace of density with PCM potential matrix: Tr(D_SO * V_pcm)
-  Tr_D_Vpcm_ = 0.0;
+  // Compute trace of density with the solvent potential: Tr(D_SO * V_solv)
+  Tr_D_Vsolv_ = 0.0;
   for (int h = 0; h < nirrep_; h++) {
     int nso = nsopi_[h];
     double **D_p = D_SO->pointer(h);
-    double **V_p = V_pcm->pointer(h);
+    double **V_p = V_solv->pointer(h);
     for (int i = 0; i < nso; i++) {
       for (int j = 0; j < nso; j++) {
-        Tr_D_Vpcm_ += D_p[i][j] * V_p[i][j];
+        Tr_D_Vsolv_ += D_p[i][j] * V_p[i][j];
       }
     }
   }
 
-  // 5. Construct H = T + V + V_pcm in the SO basis and transform to MO basis
+  // Construct H = T + V + V_solv in the SO basis and transform to MO basis
   SharedMatrix H_SO(new Matrix("H_SO", nsopi_, nsopi_));
   H_SO->zero();
   H_SO->add(T_);
   H_SO->add(V_);
-  H_SO->add(V_pcm);
+  H_SO->add(V_solv);
 
   SharedMatrix H_MO(new Matrix(H_SO));
-  H_MO->transform(Ca_curr);
+  H_MO->transform(Ca_solvent_);
 
-  // 6. Overwrite oei_full_sym_ with H_MO elements.
+  // Overwrite oei_full_sym_ with H_MO elements.
   int offset = 0;
   for (int h = 0; h < nirrep_; h++) {
     for (long int i = 0; i < nmopi_[h] - frzvpi_[h]; i++) {
@@ -4328,9 +4334,94 @@ void v2RDMSolver::update_pcm() {
     offset += (nmopi_[h] - frzvpi_[h]) * (nmopi_[h] - frzvpi_[h] + 1) / 2;
   }
 
-  // 7. Update core repulsion energy efzc_ and the active one-electron integral
+  // Update core repulsion energy efzc_ and the active one-electron integral
   // elements of c->pointer()
   FrozenCoreEnergy();
+}
+
+// Dispatch the reaction-field update to whichever solvent model is active.
+// Also performs the deferred ddx detection (see common_init): the wavefunction
+// carries a Python "ddx_interface" attribute when SCF/DDX was requested.
+void v2RDMSolver::update_solvent() {
+  if (!T_ || !V_)
+    return;
+
+  // Detect the active solvent model on the first call (deferred from
+  // common_init): PCM_enabled() is only valid after shallow_copy() has run, and
+  // the ddx check needs a valid shared_from_this().  PCM is flagged on this
+  // wavefunction by the base copy; ddx is a "ddx_interface" Python attribute on
+  // the *reference* wavefunction (where Python set it), not on this object.
+  if (!solvent_detected_) {
+    solvent_detected_ = true;
+    if (PCM_enabled()) {
+      solvent_model_ = 1;
+      outfile->Printf("\n    Implicit solvent: PCM (PCMSolver) reaction field "
+                      "active.\n");
+    } else if (reference_wavefunction_) {
+      py::object py_ref = py::cast(reference_wavefunction_);
+      if (py::hasattr(py_ref, "ddx_interface") &&
+          !py_ref.attr("ddx_interface").is_none()) {
+        solvent_model_ = 2;
+        outfile->Printf("\n    Implicit solvent: ddx (domain-decomposition) "
+                        "reaction field active.\n");
+      }
+    }
+  }
+
+  if (solvent_model_ == 1) {
+    update_pcm();
+  } else if (solvent_model_ == 2) {
+    update_ddx();
+  }
+}
+
+void v2RDMSolver::update_pcm() {
+  if (!PCM_enabled())
+    return;
+
+  py::object py_wfn = py::cast(this->shared_from_this());
+  py::object py_pcm = py_wfn.attr("get_PCM")();
+  if (py_pcm.is_none())
+    return;
+
+  SharedMatrix D_SO = BuildTotalAODensity();
+
+  // Pass D_SO to PCMSolver and compute the polarization energy and potential.
+  py::object calc_type = py::module_::import("psi4")
+                             .attr("core")
+                             .attr("PCM")
+                             .attr("CalcType")
+                             .attr("Total");
+  py::tuple pcm_terms = py_pcm.attr("compute_PCM_terms")(D_SO, calc_type);
+  double E_solv = pcm_terms[0].cast<double>();
+  SharedMatrix V_pcm = pcm_terms[1].cast<SharedMatrix>();
+
+  ApplySolventPotential(D_SO, V_pcm, E_solv);
+}
+
+void v2RDMSolver::update_ddx() {
+  if (!reference_wavefunction_)
+    return;
+  py::object py_ref = py::cast(reference_wavefunction_);
+  if (!py::hasattr(py_ref, "ddx_interface"))
+    return;
+  py::object ddx = py_ref.attr("ddx_interface");
+  if (ddx.is_none())
+    return;
+
+  SharedMatrix D_SO = BuildTotalAODensity();
+
+  // DdxInterface.get_solvation_contributions(D) -> (E_ddx, V_ddx, state).
+  // This is the direct analog of PCMSolver's compute_PCM_terms: E_ddx is the
+  // solvation free energy and V_ddx is the effective reaction-field operator in
+  // the AO basis, using the identical convention Psi4's SCF applies to both
+  // models (SCFE += u; push_back(V)).  We ignore the returned solver state and
+  // re-guess each macro-iteration, since the density changes non-trivially.
+  py::tuple ddx_terms = ddx.attr("get_solvation_contributions")(D_SO);
+  double E_solv = ddx_terms[0].cast<double>();
+  SharedMatrix V_ddx = ddx_terms[1].cast<SharedMatrix>();
+
+  ApplySolventPotential(D_SO, V_ddx, E_solv);
 }
 #endif
 

@@ -579,10 +579,21 @@ protected:
   double enuc_;
 
 #ifdef USING_PCMSolver
-  /// PCM polarization energy
-  double E_pcm_;
-  /// Trace of density with PCM potential matrix
-  double Tr_D_Vpcm_;
+  /// implicit-solvent model in use this run
+  ///   0 = none, 1 = PCM (PCMSolver), 2 = ddx (domain-decomposition, pyddx)
+  int solvent_model_;
+  /// whether the solvent model has been detected yet (deferred to the first
+  /// update_solvent(): PCM_enabled() is only valid after shallow_copy(), and
+  /// the ddx attribute check needs a valid shared_from_this())
+  bool solvent_detected_;
+  /// current MO coefficients used to build the solvent density; shared between
+  /// BuildTotalAODensity() and ApplySolventPotential()
+  std::shared_ptr<Matrix> Ca_solvent_;
+  /// solvation (polarization) free energy, 1/2 Tr(D . V_solv)
+  double E_solv_;
+  /// full linear trace of density with the folded-in solvent potential,
+  /// Tr(D . V_solv); removed from the raw energy to undo the double count
+  double Tr_D_Vsolv_;
 #endif
 
   // vectors (64-bit-capable: n_dual_ can exceed INT_MAX at large active spaces)
@@ -642,8 +653,24 @@ protected:
   void FrozenCoreEnergy();
 
 #ifdef USING_PCMSolver
-  /// update PCM potential and 1-electron integrals
+  /// true when any implicit-solvent reaction field is active this run
+  bool solvent_enabled() const;
+
+  /// refresh the reaction-field potential and 1-electron integrals against the
+  /// current v2RDM density; dispatches to the active solvent model
+  void update_solvent();
+  /// PCM (PCMSolver) reaction-field update
   void update_pcm();
+  /// ddx (domain-decomposition / pyddx) reaction-field update
+  void update_ddx();
+
+  /// build the total (alpha+beta) AO/SO-basis density from the current RDMs;
+  /// shared by every solvent model
+  std::shared_ptr<Matrix> BuildTotalAODensity();
+  /// fold a solvent potential V_solv (SO basis) into the core Hamiltonian and
+  /// record E_solv_ / Tr_D_Vsolv_; shared by every solvent model
+  void ApplySolventPotential(std::shared_ptr<Matrix> D_SO,
+                             std::shared_ptr<Matrix> V_solv, double E_solv);
 #endif
 
   /// function to rotate orbitals

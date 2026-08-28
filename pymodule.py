@@ -672,7 +672,34 @@ def run_v2rdm_casscf(name, **kwargs):
         # but keep in mind that in RHF wavefunctions, beta orbital pointer may
         # point to the same location as alpha orbital pointer
 
+    # --- ddx (domain-decomposition) implicit solvent -----------------------
+    # PCM is flagged on the wavefunction by Psi4's SCF and picked up in C++ via
+    # PCM_enabled().  ddx has no such C++ Wavefunction hook, so we build the
+    # DdxInterface here and hand it to the plugin as a Python attribute; the
+    # v2RDMSolver re-solves the reaction field against the v2RDM density each
+    # macro-iteration (see v2RDMSolver::update_ddx).  DDX and PCM are mutually
+    # exclusive (get_ddx_options enforces this).
+    used_ddx = psi4.core.get_option('SCF', 'DDX')
+    if used_ddx:
+        from psi4.driver.procrouting.solvent.ddx import DdxInterface, get_ddx_options
+        mol = ref_wfn.molecule()
+        ref_wfn.ddx_interface = DdxInterface(mol, get_ddx_options(mol),
+                                             ref_wfn.basisset())
+
     returnvalue = psi4.core.plugin('hilbert.so', ref_wfn)
+
+    # Release the DdxInterface as soon as the solve is done.  It holds Psi4 core
+    # objects (MintsHelper, DFTGrid, pyddx Model) that do not survive Python
+    # interpreter finalization; leaving it attached to the wavefunction lets it
+    # reach teardown-time GC and crash there.  Unlike PCM (a C++ object destroyed
+    # with the wavefunction) this is a plain Python attribute, so we drop it here.
+    # It also sits in a reference cycle (MintsHelper <-> basis set), so a forced
+    # collection now -- while the interpreter is fully alive -- is what actually
+    # frees it; dropping the reference alone is not enough.
+    if used_ddx and hasattr(ref_wfn, 'ddx_interface'):
+        del ref_wfn.ddx_interface
+        import gc
+        gc.collect()
 
     optstash.restore()
 
