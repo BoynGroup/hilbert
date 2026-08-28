@@ -2,7 +2,7 @@
 
 Hilbert is a collection of quantum-chemistry plugins for
 [Psi4](https://psicode.org/), developed by the DePrince group. It includes DOCI, pair-density-matrix methods,
-v2RDM-DOCI, v2RDM-CASSCF, polaritonic methods, and GPU-accelerated BPSDP for v2RDM added by here.
+v2RDM-DOCI, v2RDM-CASSCF, polaritonic methods, and GPU-accelerated BPSDP for v2RDM added by us here.
 
 ## Installation
 
