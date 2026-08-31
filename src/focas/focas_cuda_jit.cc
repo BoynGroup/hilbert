@@ -3,7 +3,6 @@
 #include <unistd.h>
 
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -14,29 +13,38 @@
 
 namespace {
 
-using TransformFn = int (*)(int, long long, double *, const double *, int, int,
-                            int);
+using TransformFn = int (*)(int, long long, double *, const double *, int, int);
+using LowRankTransformFn = int (*)(int, int, long long, double *,
+                                   const double *, const double *, int, int);
+using SessionBeginFn = int (*)(int, long long, const double *, int);
+using SessionEndFn = int (*)(double *, int);
+using AoToMoFn = int (*)(int, int, long long, const double *, double *,
+                         const double *, int, int);
 using FiExchangeFn = int (*)(int, int, int, long long, const double *, double *,
-                             double *, int, int, int);
+                             double *, int, int);
 using SymFiExchangeFn = int (*)(int, int, long long, const double *,
-                                const int *, double *, int, int, int);
+                                const int *, double *, int, int);
 using SymFaExchangeFn = int (*)(int, int, int, long long, const double *,
-                                const double *, const int *, double *, int, int,
+                                const double *, const int *, double *, int,
                                 int);
 using FaExchangeFn = int (*)(int, int, int, long long, const double *,
-                             const double *, double *, double *, int, int, int);
+                             const double *, double *, double *, int, int);
 using FiCoulombFn = int (*)(int, int, int, long long, const double *,
-                            const double *, double *, double *, int, int, int);
+                            const double *, double *, double *, int, int);
 using FaCoulombFn = int (*)(int, int, int, long long, const double *,
-                            const double *, double *, double *, int, int, int);
+                            const double *, double *, double *, int, int);
 using QFn = int (*)(int, int, int, long long, const double *, const double *,
-                    double *, int, int, int);
+                    double *, int, int);
 using SymQFn = int (*)(int, int, int, long long, const double *,
-                       const double *, const int *, double *, int, int, int);
+                       const double *, const int *, double *, int, int);
 
 std::mutex load_mutex;
 void *jit_handle = nullptr;
 TransformFn jit_transform = nullptr;
+LowRankTransformFn jit_low_rank_transform = nullptr;
+SessionBeginFn jit_session_begin = nullptr;
+SessionEndFn jit_session_end = nullptr;
+AoToMoFn jit_ao_to_mo = nullptr;
 FiExchangeFn jit_fi_exchange = nullptr;
 SymFiExchangeFn jit_sym_fi_exchange = nullptr;
 SymFaExchangeFn jit_sym_fa_exchange = nullptr;
@@ -175,6 +183,12 @@ std::string find_source() {
   const std::string source_name = "focas_cuda_bridge.cu";
   std::vector<std::string> candidates;
 
+  const std::string explicit_source =
+      env_or_empty("HILBERT_FOCAS_CUDA_SOURCE");
+  if (!explicit_source.empty()) {
+    candidates.push_back(explicit_source);
+  }
+
   candidates.push_back(join_path(dirname(__FILE__), source_name));
 
   char cwd_buffer[4096];
@@ -273,9 +287,12 @@ std::string fnv1a_hex(const std::string &text) {
   return out.str();
 }
 
-int ensure_loaded(bool verbose) {
+int ensure_loaded() {
   std::lock_guard<std::mutex> lock(load_mutex);
-  if (jit_transform != nullptr && jit_fi_exchange != nullptr &&
+  if (jit_transform != nullptr && jit_low_rank_transform != nullptr &&
+      jit_session_begin != nullptr &&
+      jit_session_end != nullptr && jit_ao_to_mo != nullptr &&
+      jit_fi_exchange != nullptr &&
       jit_sym_fi_exchange != nullptr && jit_fa_exchange != nullptr &&
       jit_fi_coulomb != nullptr && jit_fa_coulomb != nullptr &&
       jit_q != nullptr && jit_sym_q != nullptr &&
@@ -295,7 +312,7 @@ int ensure_loaded(bool verbose) {
   const std::string source_text = read_file(source);
   const std::string arch_flags = cuda_arch_flags();
   const std::string key = source_text + "\n" + arch_flags +
-                          "\nhilbert_focas_cuda_jit_v8";
+                          "\nhilbert_focas_cuda_jit_v14";
   const std::string dir = cache_dir();
   if (!mkdir_p(dir)) {
     jit_load_status = 102;
@@ -314,18 +331,9 @@ int ensure_loaded(bool verbose) {
         << " -O3 -std=c++17 --expt-relaxed-constexpr -Xcompiler -fPIC"
         << " -Xcompiler -pthread -shared" << arch_flags;
     cmd << " " << shell_quote(source) << " -o " << shell_quote(tmp_library)
-        << " -lcublas -lcudart -lpthread";
-    if (verbose) {
-      std::fprintf(stderr, "Hilbert FOCAS CUDA JIT: %s\n", cmd.str().c_str());
-    }
+        << " -lcublas -lcudart -lpthread -ldl";
     int rc = std::system(cmd.str().c_str());
     if (rc != 0) {
-      if (verbose) {
-        std::fprintf(stderr,
-                     "Hilbert FOCAS CUDA JIT compile failed: status=%d "
-                     "source=%s output=%s\n",
-                     rc, source.c_str(), tmp_library.c_str());
-      }
       jit_load_status = 103;
       return jit_load_status;
     }
@@ -337,15 +345,20 @@ int ensure_loaded(bool verbose) {
 
   jit_handle = dlopen(library.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (jit_handle == nullptr) {
-    if (verbose) {
-      std::fprintf(stderr, "Hilbert FOCAS CUDA JIT dlopen failed: %s\n", dlerror());
-    }
     jit_load_status = 105;
     return jit_load_status;
   }
 
   void *symbol_transform =
       dlsym(jit_handle, "hilbert_focas_df_c1_cuda_transform");
+  void *symbol_low_rank_transform =
+      dlsym(jit_handle, "hilbert_focas_df_c1_cuda_transform_low_rank");
+  void *symbol_session_begin =
+      dlsym(jit_handle, "hilbert_focas_df_cuda_session_begin");
+  void *symbol_session_end =
+      dlsym(jit_handle, "hilbert_focas_df_cuda_session_end");
+  void *symbol_ao_to_mo =
+      dlsym(jit_handle, "hilbert_focas_df_ao_to_mo_cuda_transform");
   void *symbol_fi =
       dlsym(jit_handle, "hilbert_focas_df_c1_cuda_fi_exchange");
   void *symbol_sym_fi =
@@ -360,7 +373,10 @@ int ensure_loaded(bool verbose) {
   void *symbol_sym_q = dlsym(jit_handle, "hilbert_focas_df_sym_cuda_q");
   void *symbol_sym_fa =
       dlsym(jit_handle, "hilbert_focas_df_sym_cuda_fa_exchange");
-  if (symbol_transform == nullptr || symbol_fi == nullptr ||
+  if (symbol_transform == nullptr || symbol_low_rank_transform == nullptr ||
+      symbol_session_begin == nullptr ||
+      symbol_session_end == nullptr || symbol_ao_to_mo == nullptr ||
+      symbol_fi == nullptr ||
       symbol_sym_fi == nullptr || symbol_fa == nullptr ||
       symbol_fi_coulomb == nullptr || symbol_fa_coulomb == nullptr ||
       symbol_q == nullptr || symbol_sym_q == nullptr ||
@@ -369,6 +385,11 @@ int ensure_loaded(bool verbose) {
     return jit_load_status;
   }
   jit_transform = reinterpret_cast<TransformFn>(symbol_transform);
+  jit_low_rank_transform =
+      reinterpret_cast<LowRankTransformFn>(symbol_low_rank_transform);
+  jit_session_begin = reinterpret_cast<SessionBeginFn>(symbol_session_begin);
+  jit_session_end = reinterpret_cast<SessionEndFn>(symbol_session_end);
+  jit_ao_to_mo = reinterpret_cast<AoToMoFn>(symbol_ao_to_mo);
   jit_fi_exchange = reinterpret_cast<FiExchangeFn>(symbol_fi);
   jit_sym_fi_exchange = reinterpret_cast<SymFiExchangeFn>(symbol_sym_fi);
   jit_fa_exchange = reinterpret_cast<FaExchangeFn>(symbol_fa);
@@ -377,118 +398,126 @@ int ensure_loaded(bool verbose) {
   jit_q = reinterpret_cast<QFn>(symbol_q);
   jit_sym_q = reinterpret_cast<SymQFn>(symbol_sym_q);
   jit_sym_fa_exchange = reinterpret_cast<SymFaExchangeFn>(symbol_sym_fa);
-  if (verbose) {
-    std::fprintf(stderr, "Hilbert FOCAS CUDA JIT loaded %s\n", library.c_str());
-  }
   return 0;
+}
+
+template <typename Function>
+int dispatch(Function function) {
+  const int load_status = ensure_loaded();
+  return load_status == 0 ? function() : load_status;
 }
 
 }  // namespace
 
-extern "C" int hilbert_focas_df_c1_cuda_transform(int nmo, long long nQ,
-                                                   double *int2,
-                                                   const double *u,
-                                                   int block_q,
-                                                   int max_devices,
-                                                   int verbose) {
-  const int status = ensure_loaded(verbose != 0);
-  if (status != 0) {
-    return status;
-  }
-  return jit_transform(nmo, nQ, int2, u, block_q, max_devices, verbose);
+extern "C" int hilbert_focas_df_cuda_session_begin(
+    int nmo, long long nQ, const double *int2, int max_devices) {
+  return dispatch(
+      [&]() { return jit_session_begin(nmo, nQ, int2, max_devices); });
+}
+
+extern "C" int hilbert_focas_df_cuda_session_end(double *int2, int commit) {
+  return dispatch([&]() { return jit_session_end(int2, commit); });
+}
+
+extern "C" int hilbert_focas_df_ao_to_mo_cuda_transform(
+    int nao, int nmo, long long nQ, const double *qao, double *qmo,
+    const double *c_pitzer, int block_q, int max_devices) {
+  return dispatch([&]() {
+    return jit_ao_to_mo(nao, nmo, nQ, qao, qmo, c_pitzer, block_q,
+                        max_devices);
+  });
+}
+
+extern "C" int hilbert_focas_df_c1_cuda_transform(
+    int nmo, long long nQ, double *int2, const double *u, int block_q,
+    int max_devices) {
+  return dispatch([&]() {
+    return jit_transform(nmo, nQ, int2, u, block_q, max_devices);
+  });
+}
+
+extern "C" int hilbert_focas_df_c1_cuda_transform_low_rank(
+    int nmo, int rank, long long nQ, double *int2, const double *v,
+    const double *a, int block_q, int max_devices) {
+  return dispatch([&]() {
+    return jit_low_rank_transform(nmo, rank, nQ, int2, v, a, block_q,
+                                  max_devices);
+  });
 }
 
 extern "C" int hilbert_focas_df_c1_cuda_fi_exchange(
     int nmo, int ndoc, int nact, long long nQ, const double *int2,
-    double *fock_occ, double *fock_ext, int q_chunk, int max_devices,
-    int verbose) {
-  const int status = ensure_loaded(verbose != 0);
-  if (status != 0) {
-    return status;
-  }
-  return jit_fi_exchange(nmo, ndoc, nact, nQ, int2, fock_occ, fock_ext,
-                         q_chunk, max_devices, verbose);
+    double *fock_occ, double *fock_ext, int q_chunk, int max_devices) {
+  return dispatch([&]() {
+    return jit_fi_exchange(nmo, ndoc, nact, nQ, int2, fock_occ, fock_ext,
+                           q_chunk, max_devices);
+  });
 }
 
 extern "C" int hilbert_focas_df_sym_cuda_fi_exchange(
     int nmo, int ndoc, long long nQ, const double *int2, const int *doc_df,
-    double *c_out, int q_chunk, int max_devices, int verbose) {
-  const int status = ensure_loaded(verbose != 0);
-  if (status != 0) {
-    return status;
-  }
-  return jit_sym_fi_exchange(nmo, ndoc, nQ, int2, doc_df, c_out, q_chunk,
-                             max_devices, verbose);
+    double *c_out, int q_chunk, int max_devices) {
+  return dispatch([&]() {
+    return jit_sym_fi_exchange(nmo, ndoc, nQ, int2, doc_df, c_out, q_chunk,
+                               max_devices);
+  });
 }
 
 extern "C" int hilbert_focas_df_c1_cuda_fa_exchange(
     int nmo, int ndoc, int nact, long long nQ, const double *int2,
     const double *den1, double *fock_occ, double *fock_ext, int q_chunk,
-    int max_devices, int verbose) {
-  const int status = ensure_loaded(verbose != 0);
-  if (status != 0) {
-    return status;
-  }
-  return jit_fa_exchange(nmo, ndoc, nact, nQ, int2, den1, fock_occ, fock_ext,
-                         q_chunk, max_devices, verbose);
+    int max_devices) {
+  return dispatch([&]() {
+    return jit_fa_exchange(nmo, ndoc, nact, nQ, int2, den1, fock_occ,
+                           fock_ext, q_chunk, max_devices);
+  });
 }
 
 extern "C" int hilbert_focas_df_sym_cuda_fa_exchange(
     int nmo, int ndoc, int nact, long long nQ, const double *int2,
     const double *den1, const int *act_df, double *c_out, int q_chunk,
-    int max_devices, int verbose) {
-  const int status = ensure_loaded(verbose != 0);
-  if (status != 0) {
-    return status;
-  }
-  return jit_sym_fa_exchange(nmo, ndoc, nact, nQ, int2, den1, act_df, c_out,
-                             q_chunk, max_devices, verbose);
+    int max_devices) {
+  return dispatch([&]() {
+    return jit_sym_fa_exchange(nmo, ndoc, nact, nQ, int2, den1, act_df,
+                               c_out, q_chunk, max_devices);
+  });
 }
 
 extern "C" int hilbert_focas_df_c1_cuda_fi_coulomb(
     int nmo, int ndoc, int nact, long long nQ, const double *int1,
     const double *int2, double *fock_occ, double *fock_ext, int q_chunk,
-    int max_devices, int verbose) {
-  const int status = ensure_loaded(verbose != 0);
-  if (status != 0) {
-    return status;
-  }
-  return jit_fi_coulomb(nmo, ndoc, nact, nQ, int1, int2, fock_occ, fock_ext,
-                        q_chunk, max_devices, verbose);
+    int max_devices) {
+  return dispatch([&]() {
+    return jit_fi_coulomb(nmo, ndoc, nact, nQ, int1, int2, fock_occ,
+                          fock_ext, q_chunk, max_devices);
+  });
 }
 
 extern "C" int hilbert_focas_df_c1_cuda_fa_coulomb(
     int nmo, int ndoc, int nact, long long nQ, const double *int2,
     const double *den1, double *fock_occ, double *fock_ext, int q_chunk,
-    int max_devices, int verbose) {
-  const int status = ensure_loaded(verbose != 0);
-  if (status != 0) {
-    return status;
-  }
-  return jit_fa_coulomb(nmo, ndoc, nact, nQ, int2, den1, fock_occ, fock_ext,
-                        q_chunk, max_devices, verbose);
+    int max_devices) {
+  return dispatch([&]() {
+    return jit_fa_coulomb(nmo, ndoc, nact, nQ, int2, den1, fock_occ,
+                          fock_ext, q_chunk, max_devices);
+  });
 }
 
 extern "C" int hilbert_focas_df_c1_cuda_q(
     int nmo, int ndoc, int nact, long long nQ, const double *int2,
-    const double *den2, double *q_out, int q_chunk, int max_devices,
-    int verbose) {
-  const int status = ensure_loaded(verbose != 0);
-  if (status != 0) {
-    return status;
-  }
-  return jit_q(nmo, ndoc, nact, nQ, int2, den2, q_out, q_chunk, max_devices,
-               verbose);
+    const double *den2, double *q_out, int q_chunk, int max_devices) {
+  return dispatch([&]() {
+    return jit_q(nmo, ndoc, nact, nQ, int2, den2, q_out, q_chunk,
+                 max_devices);
+  });
 }
 
 extern "C" int hilbert_focas_df_sym_cuda_q(
     int nmo, int ndoc, int nact, long long nQ, const double *int2,
     const double *scaled_d2, const int *act_df, double *q_out, int q_chunk,
-    int max_devices, int verbose) {
-  const int status = ensure_loaded(verbose != 0);
-  if (status != 0) {
-    return status;
-  }
-  return jit_sym_q(nmo, ndoc, nact, nQ, int2, scaled_d2, act_df, q_out, q_chunk,
-                   max_devices, verbose);
+    int max_devices) {
+  return dispatch([&]() {
+    return jit_sym_q(nmo, ndoc, nact, nQ, int2, scaled_d2, act_df, q_out,
+                     q_chunk, max_devices);
+  });
 }

@@ -27,10 +27,34 @@
 #ifndef THREEINDEXINTEGRALS_H
 #define THREEINDEXINTEGRALS_H
 
+#include <memory>
+#include <string>
+
+namespace psi {
+class Wavefunction;
+}
+
 namespace hilbert{
+
+struct DirectThreeIndexOptions {
+    std::string backend = "AUTO";
+    int block_q = 0;
+    int block_q_max = 32;
+    double memory_fraction = 0.05;
+    bool use_available_memory = true;
+    int cuda_num_gpus = 0;
+};
 
 /// transform three-index integrals to MO basis
 void ThreeIndexIntegrals(std::shared_ptr<psi::Wavefunction> ref, long int &nQ, long int memory);
+
+/// Stream the SCF three-index integrals through a bounded AO->MO transform and
+/// place the retained Pitzer-order result directly in a newly allocated,
+/// Q-major packed buffer. The caller owns qmo and must free it with free().
+void ThreeIndexIntegralsDirect(std::shared_ptr<psi::Wavefunction> ref,
+                               long int &nQ, long int memory, int retained_nmo,
+                               double *&qmo,
+                               const DirectThreeIndexOptions &options);
 
 }
 

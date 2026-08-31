@@ -52,7 +52,7 @@ module focas_genfock
       real(wp), intent(in)    :: den1(den1_nnz)
       real(wp), intent(in)    :: den2(den2_nnz)
       real(wp), intent(in)    :: int1(int1_nnz)
-      real(wp), intent(in)    :: int2(int2_nnz)
+      real(wp), intent(inout) :: int2(int2_nnz)
  
       integer, intent(in)     :: ndocpi(nirrep)
       integer, intent(in)     :: nactpi(nirrep)
@@ -109,7 +109,8 @@ module focas_genfock
 
     subroutine build_entire_gen_fock(int1,int2,den1,den2,gen_fock_out)
 
-      real(wp), intent(in) :: int1(:),int2(:),den1(:),den2(:)
+      real(wp), intent(in)    :: int1(:),den1(:),den2(:)
+      real(wp), intent(inout) :: int2(:)
       real(wp) :: gen_fock_out(:)
        
       integer :: offset,error,p_class,q_class

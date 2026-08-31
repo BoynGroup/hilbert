@@ -53,6 +53,8 @@ module focas_exponential
 
       allocate(k_block(max_nmopi,max_nmopi))
 
+      if ( allocated(trans_%compact_rank) ) trans_%compact_rank = 0
+
       do i_sym=1,nirrep_
 
         error = gather_kappa_block(kappa_in,k_block,i_sym)
@@ -95,6 +97,8 @@ module focas_exponential
 
       if ( trans_%U_eq_I(block_sym) == 1 ) then
 
+        if ( allocated(trans_%compact_rank) ) trans_%compact_rank(block_sym) = 0
+
         trans_%u_irrep_block(block_sym)%val = 0.0_wp
 
         do i = 1 , trans_%nmopi(block_sym)
@@ -120,6 +124,25 @@ module focas_exponential
       ! dimension of active block
 
       block_dim = nmo - nfzc
+
+      ! For the large-C1 use case, form an exact compact representation of
+      ! U-I before considering the dense eigensolve.  The dense matrix U is
+      ! still reconstructed for the existing OEI/MO-coefficient transforms
+      ! and for every CPU fallback, while the CUDA DF transform consumes V
+      ! and A directly.
+      if ( focas_compact_rotation_enabled_ /= 0 .and. &
+           allocated(trans_%compact_rank) .and. &
+           allocated(trans_%compact_v) .and. allocated(trans_%compact_a) ) then
+        if ( allocated(trans_%compact_v(block_sym)%val) .and. &
+             allocated(trans_%compact_a(block_sym)%val) ) then
+          success = compute_compact_block_exponential(K,block_sym,max_dim)
+          if ( success == 0 ) then
+            compute_block_exponential = 0
+            return
+          end if
+          trans_%compact_rank(block_sym) = 0
+        end if
+      end if
 
       ! ***************************
       ! allocate temporary matrices
@@ -267,6 +290,191 @@ module focas_exponential
 
       return
     end function compute_block_exponential
+
+    integer function compute_compact_block_exponential(K,block_sym,max_dim)
+      implicit none
+
+      integer, intent(in)  :: block_sym,max_dim
+      real(wp), intent(in) :: K(max_dim,max_dim)
+
+      integer :: nmo,nfzc,internal_end,rotatable_internal_dim
+      integer :: external_dim,external_rank,rank
+      integer :: i,info,lwork
+      real(wp) :: work_query(1)
+      real(wp), allocatable :: external_basis(:,:),tau(:),work(:)
+      real(wp), allocatable :: kv(:,:),projected_k(:,:),projected_u(:,:)
+      real(wp), allocatable :: va(:,:)
+
+      compute_compact_block_exponential = 1
+      nmo                    = trans_%nmopi(block_sym)
+      nfzc                   = nfzcpi_(block_sym)
+      internal_end           = ndocpi_(block_sym) + nactpi_(block_sym)
+      rotatable_internal_dim = internal_end - nfzc
+      external_dim           = nmo - internal_end
+      external_rank          = min(external_dim,rotatable_internal_dim)
+      rank                   = rotatable_internal_dim + external_rank
+
+      if ( nmo <= 0 .or. rotatable_internal_dim <= 0 .or. &
+           external_dim <= 0 ) return
+      if ( rank <= 0 .or. rank >= nmo ) return
+      if ( size(trans_%compact_v(block_sym)%val,1) /= nmo ) return
+      if ( size(trans_%compact_v(block_sym)%val,2) < rank ) return
+      if ( size(trans_%compact_a(block_sym)%val,1) < rank ) return
+      if ( size(trans_%compact_a(block_sym)%val,2) < rank ) return
+
+      trans_%compact_v(block_sym)%val = 0.0_wp
+      trans_%compact_a(block_sym)%val = 0.0_wp
+
+      ! The nonfrozen internal coordinate vectors span the only internal block
+      ! exponentiated by the legacy dense path.  A thin QR of
+      ! K(external,rotatable-internal) supplies a basis for the remaining part
+      ! of range(K).  Keeping all min(E,I) QR columns is deliberate: it makes
+      ! the representation exact even for rank-deficient trial steps without
+      ! a numerical-rank threshold.  Frozen occupied vectors remain in the
+      ! identity complement.
+      do i = 1 , rotatable_internal_dim
+        trans_%compact_v(block_sym)%val(nfzc+i,i) = 1.0_wp
+      end do
+
+      if ( external_dim <= rotatable_internal_dim ) then
+        do i = 1 , external_dim
+          trans_%compact_v(block_sym)%val(internal_end+i, &
+               rotatable_internal_dim+i) = 1.0_wp
+        end do
+      else
+        allocate(external_basis(external_dim,external_rank))
+        allocate(tau(external_rank))
+        external_basis = K(internal_end+1:nmo,nfzc+1:internal_end)
+
+        call dgeqrf(external_dim,external_rank,external_basis,external_dim, &
+             tau,work_query,-1,info)
+        if ( info /= 0 ) then
+          deallocate(external_basis,tau)
+          return
+        end if
+        lwork = max(1,int(work_query(1)))
+        allocate(work(lwork))
+        call dgeqrf(external_dim,external_rank,external_basis,external_dim, &
+             tau,work,lwork,info)
+        deallocate(work)
+        if ( info /= 0 ) then
+          deallocate(external_basis,tau)
+          return
+        end if
+
+        call dorgqr(external_dim,external_rank,external_rank,external_basis, &
+             external_dim,tau,work_query,-1,info)
+        if ( info /= 0 ) then
+          deallocate(external_basis,tau)
+          return
+        end if
+        lwork = max(1,int(work_query(1)))
+        allocate(work(lwork))
+        call dorgqr(external_dim,external_rank,external_rank,external_basis, &
+             external_dim,tau,work,lwork,info)
+        deallocate(work,tau)
+        if ( info /= 0 ) then
+          deallocate(external_basis)
+          return
+        end if
+        trans_%compact_v(block_sym)%val(internal_end+1:nmo, &
+             rotatable_internal_dim+1:rank) = external_basis
+        deallocate(external_basis)
+      end if
+
+      allocate(kv(nmo,rank))
+      allocate(projected_k(rank,rank))
+      allocate(projected_u(rank,rank))
+      allocate(va(nmo,rank))
+
+      call dgemm('N','N',nmo,rank,nmo,1.0_wp,K,max_dim, &
+           trans_%compact_v(block_sym)%val,nmo,0.0_wp,kv,nmo)
+      call dgemm('T','N',rank,rank,nmo,1.0_wp, &
+           trans_%compact_v(block_sym)%val,nmo,kv,nmo,0.0_wp,projected_k,rank)
+
+      info = skew_symmetric_exponential(projected_k,rank,projected_u)
+      if ( info /= 0 ) then
+        deallocate(kv,projected_k,projected_u,va)
+        return
+      end if
+
+      trans_%compact_a(block_sym)%val(1:rank,1:rank) = projected_u
+      do i = 1 , rank
+        trans_%compact_a(block_sym)%val(i,i) = &
+             trans_%compact_a(block_sym)%val(i,i) - 1.0_wp
+      end do
+
+      ! Reconstruct the full U for the unchanged host transforms:
+      ! U = I + V * (exp(V^T K V)-I) * V^T.
+      call dgemm('N','N',nmo,rank,rank,1.0_wp, &
+           trans_%compact_v(block_sym)%val,nmo, &
+           trans_%compact_a(block_sym)%val,rank,0.0_wp,va,nmo)
+      trans_%u_irrep_block(block_sym)%val = 0.0_wp
+      do i = 1 , nmo
+        trans_%u_irrep_block(block_sym)%val(i,i) = 1.0_wp
+      end do
+      call dgemm('N','T',nmo,nmo,rank,1.0_wp,va,nmo, &
+           trans_%compact_v(block_sym)%val,nmo,1.0_wp, &
+           trans_%u_irrep_block(block_sym)%val,nmo)
+
+      trans_%compact_rank(block_sym) = rank
+
+      deallocate(kv,projected_k,projected_u,va)
+      compute_compact_block_exponential = 0
+      return
+    end function compute_compact_block_exponential
+
+    integer function skew_symmetric_exponential(K,n,U)
+      implicit none
+
+      integer, intent(in)  :: n
+      real(wp), intent(in) :: K(n,n)
+      real(wp), intent(out) :: U(n,n)
+
+      integer :: i,info,lwork
+      real(wp) :: value,work_query(1)
+      real(wp), allocatable :: K2(:,:),X(:,:),tmp_1(:,:),tmp_2(:,:)
+      real(wp), allocatable :: eigenvalues(:),work(:)
+
+      skew_symmetric_exponential = 1
+      allocate(K2(n,n),X(n,n),tmp_1(n,n),tmp_2(n,n))
+      allocate(eigenvalues(n))
+
+      call dgemm('N','N',n,n,n,1.0_wp,K,n,K,n,0.0_wp,K2,n)
+      X = K2
+      call dsyev('V','U',n,X,n,eigenvalues,work_query,-1,info)
+      if ( info /= 0 ) then
+        deallocate(K2,X,tmp_1,tmp_2,eigenvalues)
+        return
+      end if
+      lwork = max(1,int(work_query(1)))
+      allocate(work(lwork))
+      call dsyev('V','U',n,X,n,eigenvalues,work,lwork,info)
+      deallocate(work)
+      if ( info /= 0 ) then
+        deallocate(K2,X,tmp_1,tmp_2,eigenvalues)
+        return
+      end if
+
+      do i = 1 , n
+        eigenvalues(i) = sqrt(abs(eigenvalues(i)))
+        value = 1.0_wp
+        if ( eigenvalues(i) /= 0.0_wp ) &
+             value = sin(eigenvalues(i)) / eigenvalues(i)
+        tmp_1(:,i) = value * X(:,i)
+      end do
+      call dgemm('N','T',n,n,n,1.0_wp,X,n,tmp_1,n,0.0_wp,tmp_2,n)
+      call dgemm('N','N',n,n,n,1.0_wp,K,n,tmp_2,n,0.0_wp,U,n)
+
+      do i = 1 , n
+        tmp_1(:,i) = cos(eigenvalues(i)) * X(:,i)
+      end do
+      call dgemm('N','T',n,n,n,1.0_wp,X,n,tmp_1,n,1.0_wp,U,n)
+
+      deallocate(K2,X,tmp_1,tmp_2,eigenvalues)
+      skew_symmetric_exponential = 0
+      return
+    end function skew_symmetric_exponential
 
     integer function gather_kappa_block(kappa_in,block,block_sym)
       implicit none

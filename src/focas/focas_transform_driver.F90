@@ -38,41 +38,21 @@ module focas_transform_driver
       implicit none
       real(wp) :: int2(:),int1(:),mo_coeff(:,:)
       integer :: error
-      real(wp) :: t0(2),t1(2)
-
-      focas_transform_oei_wall_ = 0.0_wp
-      focas_transform_tei_wall_ = 0.0_wp
-      focas_transform_mocoeff_wall_ = 0.0_wp
-      focas_transform_oei_cpu_ = 0.0_wp
-      focas_transform_tei_cpu_ = 0.0_wp
-      focas_transform_mocoeff_cpu_ = 0.0_wp
 
       ! 1-e integrals
-      t0 = timer()
       error = transform_oeints(int1)
-      t1 = timer()
-      focas_transform_oei_wall_ = t1(1) - t0(1)
-      focas_transform_oei_cpu_  = t1(2) - t0(2)
       if ( error /= 0 ) call abort_print(30)   
 
       ! 2-e integrals
-      t0 = timer()
       if ( df_vars_%use_df_teints == 0 ) then
         error = transform_teints(int2)
       else
         error = transform_teints_df(int2)
       end if
-      t1 = timer()
-      focas_transform_tei_wall_ = t1(1) - t0(1)
-      focas_transform_tei_cpu_  = t1(2) - t0(2)
       if ( error /= 0 ) call abort_print(31)
 
       ! mo_coeff matrix
-      t0 = timer()
       error = transform_mocoeff(mo_coeff)
-      t1 = timer()
-      focas_transform_mocoeff_wall_ = t1(1) - t0(1)
-      focas_transform_mocoeff_cpu_  = t1(2) - t0(2)
       if ( error /= 0 ) call abort_print(32)
 
       return
@@ -82,7 +62,7 @@ module focas_transform_driver
       implicit none
 
       integer :: nmo_i_sym,i_sym,i_class
-      integer :: ndoc,nact,next
+      integer :: ndoc,nact,next,rotatable_internal_dim,compact_capacity
 
       ! figure out which blocks of U must be equal to the identity matrix
       allocate(trans_%U_eq_I(nirrep_))
@@ -205,6 +185,10 @@ module focas_transform_driver
       ! allocate matrices for symmetry blocks of transformation array
 
       allocate(trans_%u_irrep_block(nirrep_))
+      allocate(trans_%compact_rank(nirrep_))
+      allocate(trans_%compact_v(nirrep_))
+      allocate(trans_%compact_a(nirrep_))
+      trans_%compact_rank = 0
 
       ! loop over symmetry blocks
 
@@ -217,6 +201,24 @@ module focas_transform_driver
         ! allocate this block
 
         allocate(trans_%u_irrep_block(i_sym)%val(nmo_i_sym,nmo_i_sym))
+
+        ! Every retained FOCAS rotation touches a nonfrozen doubly occupied or
+        ! active orbital.  With the external-external block of K identically
+        ! zero, range(K) is contained in that rotatable internal basis plus at
+        ! most one copy of its dimension in the external space.  Reserve this
+        ! exact compact representation once and reuse it for every trial.
+        rotatable_internal_dim = ndocpi_(i_sym) - nfzcpi_(i_sym) + &
+             nactpi_(i_sym)
+        compact_capacity = rotatable_internal_dim + &
+             min(nextpi_(i_sym),rotatable_internal_dim)
+        if ( rotatable_internal_dim > 0 .and. &
+             nextpi_(i_sym) > rotatable_internal_dim .and. &
+             compact_capacity < nmo_i_sym ) then
+          allocate(trans_%compact_v(i_sym)%val(nmo_i_sym,compact_capacity))
+          allocate(trans_%compact_a(i_sym)%val(compact_capacity,compact_capacity))
+          trans_%compact_v(i_sym)%val = 0.0_wp
+          trans_%compact_a(i_sym)%val = 0.0_wp
+        end if
 
       end do
 
@@ -288,6 +290,7 @@ module focas_transform_driver
       if (allocated(trans_%U_eq_I))             deallocate(trans_%U_eq_I)
       if (allocated(trans_%npairpi))            deallocate(trans_%npairpi)
       if (allocated(trans_%nmopi))              deallocate(trans_%nmopi)
+      if (allocated(trans_%compact_rank))       deallocate(trans_%compact_rank)
       if (allocated(trans_%offset))             deallocate(trans_%offset)
       if (allocated(trans_%irrep_to_class_map)) deallocate(trans_%irrep_to_class_map)
       if (allocated(trans_%class_to_irrep_map)) deallocate(trans_%class_to_irrep_map)
@@ -306,6 +309,20 @@ module focas_transform_driver
         deallocate(trans_%u_irrep_block)
 
       endif 
+
+      if (allocated(trans_%compact_v)) then
+        do i_sym = 1 , nirrep_
+          if (allocated(trans_%compact_v(i_sym)%val)) deallocate(trans_%compact_v(i_sym)%val)
+        end do
+        deallocate(trans_%compact_v)
+      endif
+
+      if (allocated(trans_%compact_a)) then
+        do i_sym = 1 , nirrep_
+          if (allocated(trans_%compact_a(i_sym)%val)) deallocate(trans_%compact_a(i_sym)%val)
+        end do
+        deallocate(trans_%compact_a)
+      endif
 
       return
     end subroutine deallocate_transformation_matrices

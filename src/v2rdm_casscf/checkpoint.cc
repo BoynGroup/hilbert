@@ -42,6 +42,7 @@
 
 #include <bpsdp_solver.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -391,7 +392,8 @@ std::string v2RDMSolver::QmoFilename() const {
 void v2RDMSolver::WriteQmoFile() {
   if (!is_df_ || Qmo_ == nullptr) return;
 
-  long int nn1mo = (long int)nmo_ * ((long int)nmo_ + 1) / 2;
+  const long int retained_nmo = (long int)nmo_ - nfrzv_;
+  long int nn1mo = retained_nmo * (retained_nmo + 1) / 2;
   long int nelem = (long int)nQ_ * nn1mo;
   double size_gb = nelem * 8.0 / 1e9;
 
@@ -474,8 +476,29 @@ bool v2RDMSolver::ReadQmoFromFile() {
     return false;
   }
 
-  long int nn1mo = (long int)nmo_ * ((long int)nmo_ + 1) / 2;
+  const long int retained_nmo = (long int)nmo_ - nfrzv_;
+  long int nn1mo = retained_nmo * (retained_nmo + 1) / 2;
   long int nelem = (long int)nQ_ * nn1mo;
+  const long int full_nn1mo =
+      (long int)nmo_ * ((long int)nmo_ + 1) / 2;
+  const std::streamoff header_bytes = 2 * sizeof(long int);
+
+  f.seekg(0, std::ios::end);
+  const std::streamoff file_bytes = f.tellg();
+  f.seekg(header_bytes, std::ios::beg);
+  const std::streamoff retained_file_bytes =
+      header_bytes + static_cast<std::streamoff>(nelem * sizeof(double));
+  const std::streamoff legacy_file_bytes =
+      header_bytes + static_cast<std::streamoff>(
+                         (long int)nQ_ * full_nn1mo * sizeof(double));
+  const bool legacy_full_rows =
+      nfrzv_ > 0 && file_bytes == legacy_file_bytes;
+  if (file_bytes != retained_file_bytes && !legacy_full_rows) {
+    outfile->Printf(
+        "    [Warning] Qmo companion file has an unexpected size — "
+        "recomputing integrals.\n");
+    return false;
+  }
 
   Qmo_ = (double *)malloc(nelem * sizeof(double));
   if (Qmo_ == nullptr) {
@@ -483,7 +506,18 @@ bool v2RDMSolver::ReadQmoFromFile() {
     return false;
   }
 
-  f.read(reinterpret_cast<char *>(Qmo_), nelem * sizeof(double));
+  if (legacy_full_rows) {
+    std::vector<double> legacy_row(full_nn1mo);
+    for (long int Q = 0; Q < (long int)nQ_; ++Q) {
+      f.read(reinterpret_cast<char *>(legacy_row.data()),
+             full_nn1mo * sizeof(double));
+      if (!f.good()) break;
+      std::copy(legacy_row.begin(), legacy_row.begin() + nn1mo,
+                Qmo_ + Q * nn1mo);
+    }
+  } else {
+    f.read(reinterpret_cast<char *>(Qmo_), nelem * sizeof(double));
+  }
   if (!f.good()) {
     outfile->Printf("    [Warning] Failed reading Qmo companion file — recomputing integrals.\n");
     free(Qmo_);

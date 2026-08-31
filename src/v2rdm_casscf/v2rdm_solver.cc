@@ -29,6 +29,8 @@
 #include <stdlib.h>
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <map>
@@ -376,6 +378,8 @@ v2RDMSolver::~v2RDMSolver() {
   }
 
   free(X_);
+  free(orbopt_data_);
+  free(orbopt_outfile_);
 }
 
 void v2RDMSolver::common_init() {
@@ -560,32 +564,47 @@ void v2RDMSolver::common_init() {
       (double)(focas_df_cuda_bool(options_, "ORBOPT_FOCAS_DF_CUDA",
                                   "ORBOPT_FOCAS_DF_C1_CUDA") ? 1.0 : 0.0);
   orbopt_data_[22] =
-      (double)(focas_df_cuda_bool(options_, "ORBOPT_FOCAS_DF_CUDA_VALIDATE",
-                                  "ORBOPT_FOCAS_DF_C1_CUDA_VALIDATE") ? 1.0
-                                                                      : 0.0);
-  orbopt_data_[23] =
       (double)focas_df_cuda_int(options_, "ORBOPT_FOCAS_DF_CUDA_NUM_GPUS",
                                 "ORBOPT_FOCAS_DF_C1_CUDA_NUM_GPUS");
-  orbopt_data_[24] =
-      (double)(focas_df_cuda_bool(options_, "ORBOPT_FOCAS_DF_CUDA_VERBOSE",
-                                  "ORBOPT_FOCAS_DF_C1_CUDA_VERBOSE") ? 1.0
-                                                                     : 0.0);
+  orbopt_data_[23] =
+      (double)(options_.get_bool("ORBOPT_FOCAS_COMPACT_ROTATION") ? 1.0 : 0.0);
+  orbopt_data_[24] = 0.0; // reserved by the legacy C++/Fortran FOCAS ABI
 
   scf_maxiter_ = options_.get_int("SCF_MAXITER");
 
   orbopt_converged_ = false;
 
-  // don't change the length of this filename
-  orbopt_outfile_ = (char *)malloc(120 * sizeof(char));
-
+  constexpr std::size_t kOrboptFilenameCapacity = 120;
+  std::string filename;
   if (!is_external_hamiltonian_) {
-
-    std::string filename =
+    filename =
         get_writer_file_prefix(reference_wavefunction_->molecule()->name()) +
         ".orbopt";
-    strcpy(orbopt_outfile_, filename.c_str());
+    if (filename.size() >= kOrboptFilenameCapacity) {
+      std::ostringstream message;
+      message << "FOCAS orbital-optimization filename is " << filename.size()
+              << " bytes, but the legacy Fortran interface accepts at most "
+              << (kOrboptFilenameCapacity - 1)
+              << ". Set WRITER_FILE_LABEL or use a shorter output path.";
+      throw PsiException(message.str(), __FILE__, __LINE__);
+    }
+  }
+  orbopt_outfile_ = static_cast<char *>(
+      std::calloc(kOrboptFilenameCapacity, sizeof(char)));
+  if (orbopt_outfile_ == nullptr) {
+    throw PsiException("could not allocate the FOCAS output filename buffer",
+                       __FILE__, __LINE__);
+  }
+  if (!filename.empty()) {
+    std::memcpy(orbopt_outfile_, filename.c_str(), filename.size() + 1);
     if (options_.get_bool("ORBOPT_WRITE")) {
       FILE *fp = fopen(orbopt_outfile_, "w");
+      if (fp == nullptr) {
+        free(orbopt_outfile_);
+        orbopt_outfile_ = nullptr;
+        throw PsiException("could not create the FOCAS orbital log file",
+                           __FILE__, __LINE__);
+      }
       fclose(fp);
     }
   }
@@ -1079,6 +1098,10 @@ void v2RDMSolver::initialize_with_molecular_hamiltonian() {
   outfile->Printf("        FOCAS step memory:                  %5s\n",
                   options_.get_bool("ORBOPT_FOCAS_STEP_MEMORY") ? "true"
                                                                 : "false");
+  outfile->Printf("        FOCAS compact exact rotation:       %5s\n",
+                  options_.get_bool("ORBOPT_FOCAS_COMPACT_ROTATION")
+                      ? "true"
+                      : "false");
   outfile->Printf("        FOCAS step increase factor:         %5.3f\n",
                   options_.get_double("ORBOPT_FOCAS_STEP_INCREASE_FACTOR"));
   outfile->Printf("        FOCAS C1 blocked DF transform:      %5s\n",
@@ -1100,11 +1123,6 @@ void v2RDMSolver::initialize_with_molecular_hamiltonian() {
                   focas_df_cuda_bool(options_, "ORBOPT_FOCAS_DF_CUDA",
                                      "ORBOPT_FOCAS_DF_C1_CUDA") ? "true"
                                                                : "false");
-  outfile->Printf("        FOCAS DF CUDA validation:           %5s\n",
-                  focas_df_cuda_bool(options_, "ORBOPT_FOCAS_DF_CUDA_VALIDATE",
-                                     "ORBOPT_FOCAS_DF_C1_CUDA_VALIDATE")
-                      ? "true"
-                      : "false");
   if (focas_df_cuda_int(options_, "ORBOPT_FOCAS_DF_CUDA_NUM_GPUS",
                         "ORBOPT_FOCAS_DF_C1_CUDA_NUM_GPUS") <= 0) {
     outfile->Printf("        FOCAS DF CUDA max GPUs:               all visible\n");
@@ -1113,11 +1131,14 @@ void v2RDMSolver::initialize_with_molecular_hamiltonian() {
                     focas_df_cuda_int(options_, "ORBOPT_FOCAS_DF_CUDA_NUM_GPUS",
                                       "ORBOPT_FOCAS_DF_C1_CUDA_NUM_GPUS"));
   }
-  outfile->Printf("        FOCAS DF CUDA verbose:              %5s\n",
-                  focas_df_cuda_bool(options_, "ORBOPT_FOCAS_DF_CUDA_VERBOSE",
-                                     "ORBOPT_FOCAS_DF_C1_CUDA_VERBOSE")
-                      ? "true"
-                      : "false");
+  outfile->Printf("        initial DF transform backend:       %5s\n",
+                  options_.get_str("DF_INTEGRAL_TRANSFORM_BACKEND").c_str());
+  outfile->Printf("        initial DF transform block_q:       %5i\n",
+                  options_.get_int("DF_INTEGRAL_TRANSFORM_BLOCK_Q"));
+  outfile->Printf("        initial DF host memory fraction:    %5.3f\n",
+                  options_.get_double("DF_INTEGRAL_TRANSFORM_MEMORY_FRACTION"));
+  outfile->Printf("        initial DF automatic block_q cap:   %5i\n",
+                  options_.get_int("DF_INTEGRAL_TRANSFORM_BLOCK_Q_MAX"));
   outfile->Printf("        print iteration info:               %5s\n",
                   options_.get_bool("ORBOPT_WRITE") ? "true" : "false");
 
@@ -1152,16 +1173,21 @@ void v2RDMSolver::initialize_with_molecular_hamiltonian() {
       outfile->Printf("\n");
 
       double start = omp_get_wtime();
-      ThreeIndexIntegrals(reference_wavefunction_, nQ_, memory_);
-
-      Qmo_ = (double *)malloc(nmo_ * (nmo_ + 1) / 2 * nQ_ * sizeof(double));
-      memset((void *)Qmo_, '\0', nmo_ * (nmo_ + 1) / 2 * nQ_ * sizeof(double));
-
-      std::shared_ptr<PSIO> psio(new PSIO());
-      psio->open(PSIF_DCC_QMO, PSIO_OPEN_OLD);
-      psio->read_entry(PSIF_DCC_QMO, "(Q|mn) Integrals", (char *)Qmo_,
-                       sizeof(double) * nQ_ * nmo_ * (nmo_ + 1) / 2);
-      psio->close(PSIF_DCC_QMO, 1);
+      DirectThreeIndexOptions transform_options;
+      transform_options.backend =
+          options_.get_str("DF_INTEGRAL_TRANSFORM_BACKEND");
+      transform_options.block_q =
+          options_.get_int("DF_INTEGRAL_TRANSFORM_BLOCK_Q");
+      transform_options.block_q_max =
+          options_.get_int("DF_INTEGRAL_TRANSFORM_BLOCK_Q_MAX");
+      transform_options.memory_fraction =
+          options_.get_double("DF_INTEGRAL_TRANSFORM_MEMORY_FRACTION");
+      transform_options.use_available_memory =
+          options_.get_bool("DF_INTEGRAL_TRANSFORM_USE_AVAILABLE_MEMORY");
+      transform_options.cuda_num_gpus =
+          options_.get_int("DF_INTEGRAL_TRANSFORM_CUDA_NUM_GPUS");
+      ThreeIndexIntegralsDirect(reference_wavefunction_, nQ_, memory_,
+                                nmo_ - nfrzv_, Qmo_, transform_options);
 
       double end = omp_get_wtime();
 

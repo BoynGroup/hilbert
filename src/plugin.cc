@@ -212,6 +212,12 @@ extern "C" PSI_API int read_options(std::string name, Options &options) {
     first trial step in later matching CASSCF orbital-optimization calls. -*/
     options.add_bool("ORBOPT_FOCAS_STEP_MEMORY", true);
 
+    /*- Use the exact compact representation U=I+V*A*V^T when the external
+    orbital space is larger than the nonfrozen occupied-plus-active space.
+    Reduces both the exponential and DF transform scaling without a rank
+    truncation. A rank-aware crossover selects the dense path when cheaper. -*/
+    options.add_bool("ORBOPT_FOCAS_COMPACT_ROTATION", true);
+
     /*- Factor used to grow the next orbital trial step after an
     accepted step. The default is 2.0; smaller values can reduce
     rejected DF integral transforms. -*/
@@ -244,42 +250,49 @@ extern "C" PSI_API int read_options(std::string name, Options &options) {
     options.add_int("ORBOPT_FOCAS_DF_C1_BLOCK_Q_MAX", 32);
 
     /*- Use the CUDA/cuBLAS implementation of the density-fitted FOCAS
-    integral transform. The CUDA path is attempted by default
-    and falls back to the CPU implementation when the helper is unavailable
-    or the system is incompatible. By default the helper is JIT-compiled
-    with nvcc on first use. Building Hilbert with HILBERT_ENABLE_CUDA_FOCAS=ON
-    links the helper directly. -*/
+    integral transform. The CUDA path is attempted by default and falls back
+    to the CPU implementation when the helper is unavailable or the system is
+    incompatible. The helper is JIT-compiled with nvcc on first use. -*/
     options.add_bool("ORBOPT_FOCAS_DF_CUDA", true);
 
-    /*- Validate the optional CUDA/cuBLAS density-fitted FOCAS integral
-    transform against the CPU transform. Only used for debugging. -*/
-    options.add_bool("ORBOPT_FOCAS_DF_CUDA_VALIDATE", false);
-
     /*- Maximum number of visible CUDA GPUs to use for the optional
-    density-fitted FOCAS transform. A value <= 0 uses all visibleCUDA devices.
+    density-fitted FOCAS transform. A value <= 0 uses all visible CUDA devices.
     -*/
     options.add_int("ORBOPT_FOCAS_DF_CUDA_NUM_GPUS", 0);
 
-    /*- Print CUDA JIT compile/load diagnostics for the optional
-    density-fitted FOCAS transform. Debug only. -*/
-    options.add_bool("ORBOPT_FOCAS_DF_CUDA_VERBOSE", false);
-
-    /*- Deprecated alias for ORBOPT_FOCAS_DF_CUDA, retained for backward
-    compatibility. Takes effect only when ORBOPT_FOCAS_DF_CUDA is left at
-    its default. -*/
+    /*-Alias for ORBOPT_FOCAS_DF_CUDA -*/
     options.add_bool("ORBOPT_FOCAS_DF_C1_CUDA", true);
 
-    /*- Deprecated alias for ORBOPT_FOCAS_DF_CUDA_VALIDATE, retained for
-    backward compatibility. -*/
-    options.add_bool("ORBOPT_FOCAS_DF_C1_CUDA_VALIDATE", false);
-
-    /*- Deprecated alias for ORBOPT_FOCAS_DF_CUDA_NUM_GPUS, retained for
-    backward compatibility. -*/
+    /*-Alias for ORBOPT_FOCAS_DF_CUDA_NUM_GPUS -*/
     options.add_int("ORBOPT_FOCAS_DF_C1_CUDA_NUM_GPUS", 0);
 
-    /*- Deprecated alias for ORBOPT_FOCAS_DF_CUDA_VERBOSE, retained for
-    backward compatibility. -*/
-    options.add_bool("ORBOPT_FOCAS_DF_C1_CUDA_VERBOSE", false);
+    /*- Backend for the initial, direct block-streamed DF AO-to-MO transform.
+    AUTO attempts the JIT CUDA helper and safely falls back to the direct CPU
+    implementation. Neither direct backend writes full QSO or half-transformed
+    tensors to scratch. -*/
+    options.add_str("DF_INTEGRAL_TRANSFORM_BACKEND", "AUTO", "AUTO CPU CUDA");
+
+    /*- Host auxiliary-function block size for the initial direct DF transform.
+    A value <= 0 chooses a memory-aware block size. -*/
+    options.add_int("DF_INTEGRAL_TRANSFORM_BLOCK_Q", 0);
+
+    /*- Fraction of configured Psi4 memory available for host scratch in the
+    initial direct DF transform, after reserving the final QMO tensor. -*/
+    options.add_double("DF_INTEGRAL_TRANSFORM_MEMORY_FRACTION", 0.05);
+
+    /*- Limit automatic host blocks for the initial direct DF transform. An
+    explicit DF_INTEGRAL_TRANSFORM_BLOCK_Q may exceed this cap when it fits the
+    checked memory budget. -*/
+    options.add_int("DF_INTEGRAL_TRANSFORM_BLOCK_Q_MAX", 32);
+
+    /*- Bound initial direct-transform host scratch using currently available
+    system memory in addition to the configured Psi4 memory. -*/
+    options.add_bool("DF_INTEGRAL_TRANSFORM_USE_AVAILABLE_MEMORY", true);
+
+    /*- Maximum visible GPUs for the initial JIT CUDA DF transform. A value <=
+    0 uses all visible GPUs. Device block sizes are selected from free memory
+    independently of the host block size. -*/
+    options.add_int("DF_INTEGRAL_TRANSFORM_CUDA_NUM_GPUS", 0);
 
     /*- maximum number of cycles for CASSCF -*/
     options.add_int("SCF_MAXITER", 75);
@@ -331,7 +344,8 @@ extern "C" PSI_API int read_options(std::string name, Options &options) {
     Enabling this allows a restart with RESTART_FROM_CHECKPOINT_FILE to skip
     the AO->MO integral transformation entirely. Only written at the
     final/post-orbopt checkpoint, not at every EACH_STEP write. Note that this
-    may be a very large file! File size: nQ * nmo*(nmo+1)/2 * 8 bytes. -*/
+    may be a very large file! File size: nQ * nret*(nret+1)/2 * 8 bytes, where
+    nret excludes frozen virtual orbitals. -*/
     options.add_bool("CHECKPOINT_WRITE_QMO", false);
 
     /*- Filename for durable v2RDM checkpoint writes. If empty, use the

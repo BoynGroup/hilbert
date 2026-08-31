@@ -32,72 +32,68 @@ module focas_gradient
 
   interface
     integer(c_int) function hilbert_focas_df_c1_cuda_fi_exchange(nmo,ndoc,nact,nQ,int2, &
-        fock_occ,fock_ext,q_chunk,max_devices,verbose) &
+        fock_occ,fock_ext,q_chunk,max_devices) &
         bind(C,name="hilbert_focas_df_c1_cuda_fi_exchange")
       import :: c_int, c_long_long, c_double
       integer(c_int), value       :: nmo
       integer(c_int), value       :: ndoc
       integer(c_int), value       :: nact
       integer(c_long_long), value :: nQ
-      real(c_double), intent(in)  :: int2(*)
+      real(c_double)              :: int2(*)
       real(c_double)              :: fock_occ(*)
       real(c_double)              :: fock_ext(*)
       integer(c_int), value       :: q_chunk
       integer(c_int), value       :: max_devices
-      integer(c_int), value       :: verbose
     end function hilbert_focas_df_c1_cuda_fi_exchange
 
     integer(c_int) function hilbert_focas_df_sym_cuda_fi_exchange(nmo,ndoc,nQ,int2, &
-        doc_df,c_out,q_chunk,max_devices,verbose) &
+        doc_df,c_out,q_chunk,max_devices) &
         bind(C,name="hilbert_focas_df_sym_cuda_fi_exchange")
       import :: c_int, c_long_long, c_double
       integer(c_int), value       :: nmo
       integer(c_int), value       :: ndoc
       integer(c_long_long), value :: nQ
-      real(c_double), intent(in)  :: int2(*)
+      real(c_double)              :: int2(*)
       integer(c_int), intent(in)  :: doc_df(*)
       real(c_double)              :: c_out(*)
       integer(c_int), value       :: q_chunk
       integer(c_int), value       :: max_devices
-      integer(c_int), value       :: verbose
     end function hilbert_focas_df_sym_cuda_fi_exchange
 
     integer(c_int) function hilbert_focas_df_sym_cuda_fa_exchange(nmo,ndoc,nact,nQ, &
-        int2,den1,act_df,c_out,q_chunk,max_devices,verbose) &
+        int2,den1,act_df,c_out,q_chunk,max_devices) &
         bind(C,name="hilbert_focas_df_sym_cuda_fa_exchange")
       import :: c_int, c_long_long, c_double
       integer(c_int), value       :: nmo
       integer(c_int), value       :: ndoc
       integer(c_int), value       :: nact
       integer(c_long_long), value :: nQ
-      real(c_double), intent(in)  :: int2(*)
+      real(c_double)              :: int2(*)
       real(c_double), intent(in)  :: den1(*)
       integer(c_int), intent(in)  :: act_df(*)
       real(c_double)              :: c_out(*)
       integer(c_int), value       :: q_chunk
       integer(c_int), value       :: max_devices
-      integer(c_int), value       :: verbose
     end function hilbert_focas_df_sym_cuda_fa_exchange
 
     integer(c_int) function hilbert_focas_df_c1_cuda_fa_exchange(nmo,ndoc,nact,nQ,int2, &
-        den1,fock_occ,fock_ext,q_chunk,max_devices,verbose) &
+        den1,fock_occ,fock_ext,q_chunk,max_devices) &
         bind(C,name="hilbert_focas_df_c1_cuda_fa_exchange")
       import :: c_int, c_long_long, c_double
       integer(c_int), value       :: nmo
       integer(c_int), value       :: ndoc
       integer(c_int), value       :: nact
       integer(c_long_long), value :: nQ
-      real(c_double), intent(in)  :: int2(*)
+      real(c_double)              :: int2(*)
       real(c_double), intent(in)  :: den1(*)
       real(c_double)              :: fock_occ(*)
       real(c_double)              :: fock_ext(*)
       integer(c_int), value       :: q_chunk
       integer(c_int), value       :: max_devices
-      integer(c_int), value       :: verbose
     end function hilbert_focas_df_c1_cuda_fa_exchange
 
     integer(c_int) function hilbert_focas_df_c1_cuda_fi_coulomb(nmo,ndoc,nact,nQ, &
-        int1,int2,fock_occ,fock_ext,q_chunk,max_devices,verbose) &
+        int1,int2,fock_occ,fock_ext,q_chunk,max_devices) &
         bind(C,name="hilbert_focas_df_c1_cuda_fi_coulomb")
       import :: c_int, c_long_long, c_double
       integer(c_int), value       :: nmo
@@ -105,61 +101,57 @@ module focas_gradient
       integer(c_int), value       :: nact
       integer(c_long_long), value :: nQ
       real(c_double), intent(in)  :: int1(*)
-      real(c_double), intent(in)  :: int2(*)
+      real(c_double)              :: int2(*)
       real(c_double)              :: fock_occ(*)
       real(c_double)              :: fock_ext(*)
       integer(c_int), value       :: q_chunk
       integer(c_int), value       :: max_devices
-      integer(c_int), value       :: verbose
     end function hilbert_focas_df_c1_cuda_fi_coulomb
 
     integer(c_int) function hilbert_focas_df_c1_cuda_fa_coulomb(nmo,ndoc,nact,nQ, &
-        int2,den1,fock_occ,fock_ext,q_chunk,max_devices,verbose) &
+        int2,den1,fock_occ,fock_ext,q_chunk,max_devices) &
         bind(C,name="hilbert_focas_df_c1_cuda_fa_coulomb")
       import :: c_int, c_long_long, c_double
       integer(c_int), value       :: nmo
       integer(c_int), value       :: ndoc
       integer(c_int), value       :: nact
       integer(c_long_long), value :: nQ
-      real(c_double), intent(in)  :: int2(*)
+      real(c_double)              :: int2(*)
       real(c_double), intent(in)  :: den1(*)
       real(c_double)              :: fock_occ(*)
       real(c_double)              :: fock_ext(*)
       integer(c_int), value       :: q_chunk
       integer(c_int), value       :: max_devices
-      integer(c_int), value       :: verbose
     end function hilbert_focas_df_c1_cuda_fa_coulomb
 
     integer(c_int) function hilbert_focas_df_c1_cuda_q(nmo,ndoc,nact,nQ,int2, &
-        den2,q,q_chunk,max_devices,verbose) bind(C,name="hilbert_focas_df_c1_cuda_q")
+        den2,q,q_chunk,max_devices) bind(C,name="hilbert_focas_df_c1_cuda_q")
       import :: c_int, c_long_long, c_double
       integer(c_int), value       :: nmo
       integer(c_int), value       :: ndoc
       integer(c_int), value       :: nact
       integer(c_long_long), value :: nQ
-      real(c_double), intent(in)  :: int2(*)
+      real(c_double)              :: int2(*)
       real(c_double), intent(in)  :: den2(*)
       real(c_double)              :: q(*)
       integer(c_int), value       :: q_chunk
       integer(c_int), value       :: max_devices
-      integer(c_int), value       :: verbose
     end function hilbert_focas_df_c1_cuda_q
 
     integer(c_int) function hilbert_focas_df_sym_cuda_q(nmo,ndoc,nact,nQ,int2, &
-        scaled_d2,act_df,q,q_chunk,max_devices,verbose) &
+        scaled_d2,act_df,q,q_chunk,max_devices) &
         bind(C,name="hilbert_focas_df_sym_cuda_q")
       import :: c_int, c_long_long, c_double
       integer(c_int), value       :: nmo
       integer(c_int), value       :: ndoc
       integer(c_int), value       :: nact
       integer(c_long_long), value :: nQ
-      real(c_double), intent(in)  :: int2(*)
+      real(c_double)              :: int2(*)
       real(c_double), intent(in)  :: scaled_d2(*)
       integer(c_int), intent(in)  :: act_df(*)
       real(c_double)              :: q(*)
       integer(c_int), value       :: q_chunk
       integer(c_int), value       :: max_devices
-      integer(c_int), value       :: verbose
     end function hilbert_focas_df_sym_cuda_q
   end interface
 
@@ -167,82 +159,44 @@ module focas_gradient
 
   subroutine orbital_gradient(int1,int2,den1,den2)
     implicit none
-    real(wp), intent(in) :: int1(:),int2(:),den1(:),den2(:)
-    real(wp) :: t0(2),t1(2)
+    real(wp), intent(in)    :: int1(:),den1(:),den2(:)
+    real(wp), intent(inout) :: int2(:)
     type(fock_info) :: fock
     integer :: i
     real(wp), allocatable :: tq(:,:)
-
-    focas_gradient_fi_coul_wall_ = 0.0_wp
-    focas_gradient_fi_exch_wall_ = 0.0_wp
-    focas_gradient_fa_coul_wall_ = 0.0_wp
-    focas_gradient_fa_exch_wall_ = 0.0_wp
-    focas_gradient_q_wall_ = 0.0_wp
-    focas_gradient_z_wall_ = 0.0_wp
-    focas_gradient_assemble_wall_ = 0.0_wp
    
     ! calculate inactive Fock matrix
     if ( df_vars_%use_df_teints == 0 ) then
-       t0 = timer()
        call compute_f_i(int1,int2)
-       t1 = timer()
-       focas_gradient_fi_coul_wall_ = t1(1) - t0(1)
     else
-      t0 = timer()
       call compute_f_i_df_coulomb(int1,int2)
-      t1 = timer()
-      focas_gradient_fi_coul_wall_ = t1(1) - t0(1)
-      t0 = timer()
       call compute_f_i_df_exchange_fast(int2)
-      t1 = timer()
-      focas_gradient_fi_exch_wall_ = t1(1) - t0(1)
 !      call compute_f_i_df_exchange(int2)
     endif
     call transpose_matrix(fock_i_)
 
     ! calculate active Fock matrix
     if ( df_vars_%use_df_teints == 0 ) then
-      t0 = timer()
       call compute_f_a(den1,int2)
-      t1 = timer()
-      focas_gradient_fa_coul_wall_ = t1(1) - t0(1)
     else
-      t0 = timer()
       call compute_f_a_df_coulomb(den1,int2)
-      t1 = timer()
-      focas_gradient_fa_coul_wall_ = t1(1) - t0(1)
 !      call compute_f_a_df_exchange(den1,int2)
-      t0 = timer()
       call compute_f_a_df_exchange_fast(den1,int2)
-      t1 = timer()
-      focas_gradient_fa_exch_wall_ = t1(1) - t0(1)
     endif
     call transpose_matrix(fock_a_)
 
     ! calculate auxiliary q matrix
     if ( df_vars_%use_df_teints == 0 ) then
-      t0 = timer()
       call compute_q(den2,int2)
-      t1 = timer()
-      focas_gradient_q_wall_ = t1(1) - t0(1)
     else
-      t0 = timer()
       call compute_q_df(den2,int2)
-      t1 = timer()
-      focas_gradient_q_wall_ = t1(1) - t0(1)
     endif
 
     ! calculate auxiliary z matrix
-    t0 = timer()
     call compute_z(den1)
-    t1 = timer()
-    focas_gradient_z_wall_ = t1(1) - t0(1)
 
     ! compute gradient
-    t0 = timer()
     call compute_orbital_gradient()
-    t1 = timer()
-    focas_gradient_assemble_wall_ = t1(1) - t0(1)
 
 !    write(fid_,*)
 !    write(fid_,*)'F_i matrix'
@@ -270,37 +224,14 @@ module focas_gradient
 
     use_c1_cuda_gradient_exchange = .false.
 
-    if ( focas_df_c1_cuda_enabled_ == 0 ) then
-      call report_c1_cuda_gradient_exchange_skip('FOCAS C1 CUDA is disabled')
-      return
-    end if
-    if ( focas_df_c1_cuda_validate_ /= 0 ) then
-      call report_c1_cuda_gradient_exchange_skip('FOCAS C1 CUDA validation is enabled')
-      return
-    end if
-    if ( df_vars_%use_df_teints == 0 ) then
-      call report_c1_cuda_gradient_exchange_skip('DF two-electron integrals are disabled')
-      return
-    end if
-    if ( nirrep_ /= 1 ) then
-      call report_c1_cuda_gradient_exchange_skip('point group is not C1')
-      return
-    end if
-    if ( df_vars_%Qstride /= ngem_tot_ ) then
-      call report_c1_cuda_gradient_exchange_skip('DF integral layout is not Q-major')
-      return
-    end if
-    if ( nmo_tot_ <= 0 ) then
-      call report_c1_cuda_gradient_exchange_skip('there are no orbitals')
-      return
-    end if
-    if ( next_tot_ <= 0 ) then
-      call report_c1_cuda_gradient_exchange_skip('there are no external orbitals')
-      return
-    end if
+    if ( focas_df_c1_cuda_enabled_ == 0 ) return
+    if ( df_vars_%use_df_teints == 0 ) return
+    if ( nirrep_ /= 1 ) return
+    if ( df_vars_%Qstride /= ngem_tot_ ) return
+    if ( nmo_tot_ <= 0 ) return
+    if ( next_tot_ <= 0 ) return
 
     use_c1_cuda_gradient_exchange = .true.
-    call report_c1_cuda_gradient_exchange_enabled()
 
     return
   end function use_c1_cuda_gradient_exchange
@@ -314,7 +245,6 @@ module focas_gradient
     use_sym_cuda_gradient_exchange = .false.
 
     if ( focas_df_c1_cuda_enabled_ == 0 ) return
-    if ( focas_df_c1_cuda_validate_ /= 0 ) return
     if ( df_vars_%use_df_teints == 0 ) return
     if ( df_vars_%Qstride /= ngem_tot_ ) return
     if ( nmo_tot_ <= 0 ) return
@@ -330,37 +260,14 @@ module focas_gradient
 
     use_c1_cuda_gradient_coulomb = .false.
 
-    if ( focas_df_c1_cuda_enabled_ == 0 ) then
-      call report_c1_cuda_gradient_coulomb_skip('FOCAS C1 CUDA is disabled')
-      return
-    end if
-    if ( focas_df_c1_cuda_validate_ /= 0 ) then
-      call report_c1_cuda_gradient_coulomb_skip('FOCAS C1 CUDA validation is enabled')
-      return
-    end if
-    if ( df_vars_%use_df_teints == 0 ) then
-      call report_c1_cuda_gradient_coulomb_skip('DF two-electron integrals are disabled')
-      return
-    end if
-    if ( nirrep_ /= 1 ) then
-      call report_c1_cuda_gradient_coulomb_skip('point group is not C1')
-      return
-    end if
-    if ( df_vars_%Qstride /= ngem_tot_ ) then
-      call report_c1_cuda_gradient_coulomb_skip('DF integral layout is not Q-major')
-      return
-    end if
-    if ( nmo_tot_ <= 0 ) then
-      call report_c1_cuda_gradient_coulomb_skip('there are no orbitals')
-      return
-    end if
-    if ( next_tot_ <= 0 ) then
-      call report_c1_cuda_gradient_coulomb_skip('there are no external orbitals')
-      return
-    end if
+    if ( focas_df_c1_cuda_enabled_ == 0 ) return
+    if ( df_vars_%use_df_teints == 0 ) return
+    if ( nirrep_ /= 1 ) return
+    if ( df_vars_%Qstride /= ngem_tot_ ) return
+    if ( nmo_tot_ <= 0 ) return
+    if ( next_tot_ <= 0 ) return
 
     use_c1_cuda_gradient_coulomb = .true.
-    call report_c1_cuda_gradient_coulomb_enabled()
 
     return
   end function use_c1_cuda_gradient_coulomb
@@ -370,37 +277,14 @@ module focas_gradient
 
     use_c1_cuda_gradient_q = .false.
 
-    if ( focas_df_c1_cuda_enabled_ == 0 ) then
-      call report_c1_cuda_gradient_q_skip('FOCAS C1 CUDA is disabled')
-      return
-    end if
-    if ( focas_df_c1_cuda_validate_ /= 0 ) then
-      call report_c1_cuda_gradient_q_skip('FOCAS C1 CUDA validation is enabled')
-      return
-    end if
-    if ( df_vars_%use_df_teints == 0 ) then
-      call report_c1_cuda_gradient_q_skip('DF two-electron integrals are disabled')
-      return
-    end if
-    if ( nirrep_ /= 1 ) then
-      call report_c1_cuda_gradient_q_skip('point group is not C1')
-      return
-    end if
-    if ( df_vars_%Qstride /= ngem_tot_ ) then
-      call report_c1_cuda_gradient_q_skip('DF integral layout is not Q-major')
-      return
-    end if
-    if ( nmo_tot_ <= 0 ) then
-      call report_c1_cuda_gradient_q_skip('there are no orbitals')
-      return
-    end if
-    if ( nact_tot_ <= 0 ) then
-      call report_c1_cuda_gradient_q_skip('there are no active orbitals')
-      return
-    end if
+    if ( focas_df_c1_cuda_enabled_ == 0 ) return
+    if ( df_vars_%use_df_teints == 0 ) return
+    if ( nirrep_ /= 1 ) return
+    if ( df_vars_%Qstride /= ngem_tot_ ) return
+    if ( nmo_tot_ <= 0 ) return
+    if ( nact_tot_ <= 0 ) return
 
     use_c1_cuda_gradient_q = .true.
-    call report_c1_cuda_gradient_q_enabled()
 
     return
   end function use_c1_cuda_gradient_q
@@ -414,7 +298,6 @@ module focas_gradient
     use_sym_cuda_gradient_q = .false.
 
     if ( focas_df_c1_cuda_enabled_ == 0 ) return
-    if ( focas_df_c1_cuda_validate_ /= 0 ) return
     if ( df_vars_%use_df_teints == 0 ) return
     if ( df_vars_%Qstride /= ngem_tot_ ) return
     if ( nmo_tot_ <= 0 ) return
@@ -424,87 +307,6 @@ module focas_gradient
 
     return
   end function use_sym_cuda_gradient_q
-
-  subroutine report_c1_cuda_gradient_exchange_skip(reason)
-    implicit none
-    character(*), intent(in) :: reason
-    logical, save :: reported = .false.
-
-    if ( reported ) return
-    if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) then
-      write(fid_,'(a,1x,a)') 'focas_gradient_cuda_exchange disabled:',trim(reason)
-      reported = .true.
-    end if
-
-    return
-  end subroutine report_c1_cuda_gradient_exchange_skip
-
-  subroutine report_c1_cuda_gradient_exchange_enabled()
-    implicit none
-    logical, save :: reported = .false.
-
-    if ( reported ) return
-    if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) then
-      write(fid_,'(a)') 'focas_gradient_cuda_exchange enabled: C1 DF Fi/Fa exchange'
-      reported = .true.
-    end if
-
-    return
-  end subroutine report_c1_cuda_gradient_exchange_enabled
-
-  subroutine report_c1_cuda_gradient_coulomb_skip(reason)
-    implicit none
-    character(*), intent(in) :: reason
-    logical, save :: reported = .false.
-
-    if ( reported ) return
-    if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) then
-      write(fid_,'(a,1x,a)') 'focas_gradient_cuda_coulomb disabled:',trim(reason)
-      reported = .true.
-    end if
-
-    return
-  end subroutine report_c1_cuda_gradient_coulomb_skip
-
-  subroutine report_c1_cuda_gradient_coulomb_enabled()
-    implicit none
-    logical, save :: reported = .false.
-
-    if ( reported ) return
-    if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) then
-      write(fid_,'(a)') 'focas_gradient_cuda_coulomb enabled: C1 DF Fi/Fa Coulomb'
-      reported = .true.
-    end if
-
-    return
-  end subroutine report_c1_cuda_gradient_coulomb_enabled
-
-  subroutine report_c1_cuda_gradient_q_skip(reason)
-    implicit none
-    character(*), intent(in) :: reason
-    logical, save :: reported = .false.
-
-    if ( reported ) return
-    if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) then
-      write(fid_,'(a,1x,a)') 'focas_gradient_cuda_q disabled:',trim(reason)
-      reported = .true.
-    end if
-
-    return
-  end subroutine report_c1_cuda_gradient_q_skip
-
-  subroutine report_c1_cuda_gradient_q_enabled()
-    implicit none
-    logical, save :: reported = .false.
-
-    if ( reported ) return
-    if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) then
-      write(fid_,'(a)') 'focas_gradient_cuda_q enabled: C1 DF Q contraction'
-      reported = .true.
-    end if
-
-    return
-  end subroutine report_c1_cuda_gradient_q_enabled
 
   subroutine transpose_matrix(fock)
 
@@ -946,7 +748,8 @@ module focas_gradient
 
     implicit none
 
-    real(wp), intent(in) :: den2(:),int2(:)
+    real(wp), intent(in)    :: den2(:)
+    real(wp), intent(inout) :: int2(:)
 
     integer :: tu_sym,t_sym,u_sym,v_sym,w_sym,p_sym
     integer :: p_class
@@ -976,11 +779,9 @@ module focas_gradient
       cuda_status = hilbert_focas_df_c1_cuda_q( &
            int(nmo_tot_,kind=c_int),int(ndoc_tot_,kind=c_int), &
            int(nact_tot_,kind=c_int),int(df_vars_%nQ,kind=c_long_long), &
-           int2,den2,q_(1,1),0,int(focas_df_c1_cuda_num_gpus_,kind=c_int), &
-           int(focas_df_c1_cuda_verbose_,kind=c_int))
+           int2,den2,q_(1,1),0,int(focas_df_c1_cuda_num_gpus_,kind=c_int))
       if ( cuda_status == 0 ) return
-      if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) &
-           write(fid_,'(a,1x,i6)') 'focas_gradient_cuda_q_fallback status',cuda_status
+      if ( cuda_status == focas_cuda_session_fatal_status_ ) call abort_print(33)
     end if
 
     ! *********************************************************************
@@ -1051,8 +852,7 @@ module focas_gradient
            int(nmo_tot_,kind=c_int),int(ndoc_tot_,kind=c_int), &
            int(nact_tot_,kind=c_int),int(df_vars_%nQ,kind=c_long_long), &
            int2,scaled_d2_sym,act_df_list,q_df_tmp(1,1),0, &
-           int(focas_df_c1_cuda_num_gpus_,kind=c_int), &
-           int(focas_df_c1_cuda_verbose_,kind=c_int))
+           int(focas_df_c1_cuda_num_gpus_,kind=c_int))
 
       if ( cuda_status == 0 ) then
         ! remap df-order orbital columns into class order
@@ -1066,9 +866,9 @@ module focas_gradient
         return
       end if
 
+      if ( cuda_status == focas_cuda_session_fatal_status_ ) call abort_print(33)
+
       deallocate(scaled_d2_sym,q_df_tmp,act_df_list,act_sym_l,act_class_l)
-      if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) &
-           write(fid_,'(a,1x,i6)') 'focas_gradient_cuda_sym_q_fallback status',cuda_status
 
     end if
 
@@ -1361,7 +1161,7 @@ module focas_gradient
     !    2) evaluate required 4-index integrals using DGEMMs 
     !    3) update Fock matrix elements
 
-    real(wp), intent(in) :: int2(:)
+    real(wp), intent(inout) :: int2(:)
     real(wp), intent(in) :: den1(:)
 
     integer     :: p_class,q_class
@@ -1390,11 +1190,9 @@ module focas_gradient
            int(nmo_tot_,kind=c_int),int(ndoc_tot_,kind=c_int), &
            int(nact_tot_,kind=c_int),int(df_vars_%nQ,kind=c_long_long), &
            int2,den1,fock_a_%occ(1)%val(1,1),fock_a_%ext(1)%val(1), &
-           0,int(focas_df_c1_cuda_num_gpus_,kind=c_int), &
-           int(focas_df_c1_cuda_verbose_,kind=c_int))
+           0,int(focas_df_c1_cuda_num_gpus_,kind=c_int))
       if ( cuda_status == 0 ) return
-      if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) &
-           write(fid_,'(a,1x,i6)') 'focas_gradient_cuda_fa_exchange_fallback status',cuda_status
+      if ( cuda_status == focas_cuda_session_fatal_status_ ) call abort_print(33)
     end if
 
     ! *********************************************************************
@@ -1440,8 +1238,7 @@ module focas_gradient
            int(nmo_tot_,kind=c_int),int(ndoc_tot_,kind=c_int), &
            int(nact_tot_,kind=c_int),int(df_vars_%nQ,kind=c_long_long), &
            int2,den1_act,act_df_list,c_sym,0, &
-           int(focas_df_c1_cuda_num_gpus_,kind=c_int), &
-           int(focas_df_c1_cuda_verbose_,kind=c_int))
+           int(focas_df_c1_cuda_num_gpus_,kind=c_int))
 
       if ( cuda_status == 0 ) then
 
@@ -1479,9 +1276,9 @@ module focas_gradient
 
       end if
 
+      if ( cuda_status == focas_cuda_session_fatal_status_ ) call abort_print(33)
+
       deallocate(act_df_list,act_sym_l,act_class_l,den1_act,c_sym)
-      if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) &
-           write(fid_,'(a,1x,i6)') 'focas_gradient_cuda_sym_fa_exchange_fallback status',cuda_status
 
     end if
 
@@ -1770,7 +1567,8 @@ module focas_gradient
 
     implicit none
 
-    real(wp), intent(in) :: den1(:), int2(:)
+    real(wp), intent(in)    :: den1(:)
+    real(wp), intent(inout) :: int2(:)
 
     integer :: p_class,q_class,q_class_max
     integer :: tu_den,qt_int
@@ -1798,12 +1596,9 @@ module focas_gradient
            int(nmo_tot_,kind=c_int), int(ndoc_tot_,kind=c_int), &
            int(nact_tot_,kind=c_int), int(df_vars_%nQ,kind=c_long_long), &
            int2, den1, fock_a_%occ(1)%val(1,1), fock_a_%ext(1)%val(1), &
-           0, int(focas_df_c1_cuda_num_gpus_,kind=c_int), &
-           int(focas_df_c1_cuda_verbose_,kind=c_int))
+           0, int(focas_df_c1_cuda_num_gpus_,kind=c_int))
       if ( cuda_status == 0 ) return
-      if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) then
-        write(fid_,'(a,1x,i6)') 'focas_gradient_cuda_fa_coulomb_fallback status',cuda_status
-      end if
+      if ( cuda_status == focas_cuda_session_fatal_status_ ) call abort_print(33)
     end if
 
     ! *** Coulomb terms ***
@@ -2270,7 +2065,8 @@ module focas_gradient
 
     implicit none
 
-    real(wp), intent(in) :: int1(:),int2(:)
+    real(wp), intent(in)    :: int1(:)
+    real(wp), intent(inout) :: int2(:)
 
     integer :: i_sym,p_sym
     integer :: i,p,q,p_i,q_i,q_min,q_max
@@ -2296,12 +2092,9 @@ module focas_gradient
            int(nmo_tot_,kind=c_int), int(ndoc_tot_,kind=c_int), &
            int(nact_tot_,kind=c_int), int(df_vars_%nQ,kind=c_long_long), &
            int1, int2, fock_i_%occ(1)%val(1,1), fock_i_%ext(1)%val(1), &
-           0, int(focas_df_c1_cuda_num_gpus_,kind=c_int), &
-           int(focas_df_c1_cuda_verbose_,kind=c_int))
+           0, int(focas_df_c1_cuda_num_gpus_,kind=c_int))
       if ( cuda_status == 0 ) return
-      if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) then
-        write(fid_,'(a,1x,i6)') 'focas_gradient_cuda_fi_coulomb_fallback status',cuda_status
-      end if
+      if ( cuda_status == focas_cuda_session_fatal_status_ ) call abort_print(33)
     end if
 
     qint_%tuQ(1)%val(:,1) = 0.0_wp
@@ -2550,7 +2343,7 @@ module focas_gradient
     !    2) evaluate required 4-index integrals using DGEMMs 
     !    3) update Fock matrix elements
 
-    real(wp), intent(in) :: int2(:)
+    real(wp), intent(inout) :: int2(:)
 
     integer :: p_class,q_class
     integer :: p_sym,i_sym
@@ -2574,11 +2367,9 @@ module focas_gradient
            int(nmo_tot_,kind=c_int),int(ndoc_tot_,kind=c_int), &
            int(nact_tot_,kind=c_int),int(df_vars_%nQ,kind=c_long_long), &
            int2,fock_i_%occ(1)%val(1,1),fock_i_%ext(1)%val(1), &
-           0,int(focas_df_c1_cuda_num_gpus_,kind=c_int), &
-           int(focas_df_c1_cuda_verbose_,kind=c_int))
+           0,int(focas_df_c1_cuda_num_gpus_,kind=c_int))
       if ( cuda_status == 0 ) return
-      if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) &
-           write(fid_,'(a,1x,i6)') 'focas_gradient_cuda_fi_exchange_fallback status',cuda_status
+      if ( cuda_status == focas_cuda_session_fatal_status_ ) call abort_print(33)
     end if
 
     ! *********************************************************************
@@ -2604,8 +2395,7 @@ module focas_gradient
       cuda_status = hilbert_focas_df_sym_cuda_fi_exchange( &
            int(nmo_tot_,kind=c_int),int(ndoc_tot_,kind=c_int), &
            int(df_vars_%nQ,kind=c_long_long),int2,doc_df_list,c_sym, &
-           0,int(focas_df_c1_cuda_num_gpus_,kind=c_int), &
-           int(focas_df_c1_cuda_verbose_,kind=c_int))
+           0,int(focas_df_c1_cuda_num_gpus_,kind=c_int))
 
       if ( cuda_status == 0 ) then
 
@@ -2646,9 +2436,9 @@ module focas_gradient
 
       end if
 
+      if ( cuda_status == focas_cuda_session_fatal_status_ ) call abort_print(33)
+
       deallocate(doc_df_list,c_sym)
-      if ( (log_print_ == 1) .and. (focas_df_c1_cuda_verbose_ /= 0) ) &
-           write(fid_,'(a,1x,i6)') 'focas_gradient_cuda_sym_fi_exchange_fallback status',cuda_status
 
     end if
 

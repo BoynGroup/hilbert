@@ -110,9 +110,9 @@ prerequisites are not met.
 | Option | Default | Description |
 | --- | ---: | --- |
 | `ORBOPT_FOCAS_DF_CUDA` | `true` | Attempt the CUDA/cuBLAS density-fitted FOCAS transform. Incompatible cases automatically fall back to the CPU implementation. |
+| `ORBOPT_FOCAS_COMPACT_ROTATION` | `true` | Use the exact low-rank representation of `exp(K)-I`, a rank-aware crossover selects the dense path when cheaper. |
 | `ORBOPT_EXACT_DIAGONAL_HESSIAN` | `false` | Use exact diagonal orbital-Hessian expressions. Default to faster diagonal. |
 | `ORBOPT_FOCAS_DF_CUDA_NUM_GPUS` | `0` | Maximum visible GPUs for CUDA FOCAS. Non-positive uses all visible devices. |
-| `ORBOPT_FOCAS_DF_CUDA_VERBOSE` | `false` | Print CUDA FOCAS JIT compile and load diagnostics for debugging. |
 
 CUDA orbital optimization is opportunistic. Setting it as the default does not make CUDA a
 requirement for orbital optimization. Hilbert falls back to the blocked CPU
@@ -127,4 +127,3 @@ transform if the helper cannot be loaded or the problem is incompatible.
 | `GPU_ADMM_GAP_RELATIVE_TOL` | `0.0` | Relative gap tolerance when enabled. |
 | `GPU_ADMM_STAGNATION_WINDOW` | `100` | Energy-stagnation window in ADMM iterations. |
 | `GPU_ADMM_STAGNATION_ENERGY_TOL` | `0.0` | Energy span threshold; non-positive values use `E_CONVERGENCE`. |
-

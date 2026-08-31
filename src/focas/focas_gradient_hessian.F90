@@ -74,7 +74,7 @@ module focas_gradient_hessian
     real(wp), intent(inout) :: ret_arr(ret_arr_dim) ! output array with gradient and hessian elements
     real(wp), intent(in)    :: orbopt_data(15)      ! input/output array
     real(wp), intent(in)    :: int1(nnz_int1)       ! nonzero 1-e integral matrix elements
-    real(wp), intent(in)    :: int2(nnz_int2)       ! nonzero 2-e integral matrix elements 
+    real(wp), intent(inout) :: int2(nnz_int2)       ! nonzero 2-e integral matrix elements
     real(wp), intent(in)    :: den1(nnz_den1)       ! nonzero 1-e density matrix elements
     real(wp), intent(in)    :: den2(nnz_den2)       ! nonzero 2-e density matrix elements
     ! local variables

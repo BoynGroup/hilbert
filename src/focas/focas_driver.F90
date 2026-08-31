@@ -33,8 +33,29 @@ module focas_driver
   use focas_exponential
   use focas_redundant
   use focas_diis
+  use iso_c_binding, only: c_int, c_long_long, c_double
 
   implicit none
+
+  interface
+    integer(c_int) function hilbert_focas_df_cuda_session_begin( &
+        nmo,nQ,int2,max_devices) &
+        bind(C,name="hilbert_focas_df_cuda_session_begin")
+      import :: c_int, c_long_long, c_double
+      integer(c_int), value       :: nmo
+      integer(c_long_long), value :: nQ
+      real(c_double), intent(in)  :: int2(*)
+      integer(c_int), value       :: max_devices
+    end function hilbert_focas_df_cuda_session_begin
+
+    integer(c_int) function hilbert_focas_df_cuda_session_end( &
+        int2,commit) &
+        bind(C,name="hilbert_focas_df_cuda_session_end")
+      import :: c_int, c_double
+      real(c_double)              :: int2(*)
+      integer(c_int), value       :: commit
+    end function hilbert_focas_df_cuda_session_end
+  end interface
 
   logical, save  :: focas_step_memory_valid_ = .false.
   integer, save  :: focas_step_memory_nirrep_ = -1
@@ -63,7 +84,7 @@ module focas_driver
     real(wp), intent(inout) :: orbopt_data(25) ! input/output array
     real(wp), intent(inout) :: mo_coeff(:,:)   ! mo coefficient matrix
     real(wp), intent(in)    :: int1(nnz_int1)  ! nonzero 1-e integral matrix elements
-    real(wp), intent(in)    :: int2(nnz_int2)  ! nonzero 2-e integral matrix elements 
+    real(wp), intent(inout) :: int2(nnz_int2)  ! nonzero 2-e integral matrix elements
     real(wp), intent(in)    :: den1(nnz_den1)  ! nonzero 1-e density matrix elements
     real(wp), intent(in)    :: den2(nnz_den2)  ! nonzero 2-e density matrix elements
     ! character
@@ -83,17 +104,11 @@ module focas_driver
 
     ! timing variables
     real(wp) :: t0(2),t1(2),t_ene,t_gh,t_exp,t_wall_trans,t_cpu_trans,t_wall_aux,t_cpu_aux
-    real(wp) :: t_wall_exp,t_cpu_exp,t_wall_energy,t_cpu_energy
-    real(wp) :: t_wall_gradient,t_cpu_gradient,t_wall_hessian,t_cpu_hessian
-    real(wp) :: t_wall_oei,t_cpu_oei,t_wall_tei,t_cpu_tei,t_wall_mocoeff,t_cpu_mocoeff
-    real(wp) :: t_wall_grad_fi_coul,t_wall_grad_fi_exch
-    real(wp) :: t_wall_grad_fa_coul,t_wall_grad_fa_exch
-    real(wp) :: t_wall_grad_q,t_wall_grad_z,t_wall_grad_assemble
 
     ! iteration variables
     real(wp) :: current_energy,last_energy,delta_energy,gradient_norm_tolerance,delta_energy_tolerance
     real(wp) :: initial_energy,delta_energy_approximate
-    integer  :: i,iter,max_iter,error,converged
+    integer  :: i,iter,max_iter,error,converged,cuda_session_status
 
     ! variables for trust radius
     integer :: evaluate_gradient,reject
@@ -101,11 +116,10 @@ module focas_driver
     real(wp) :: r_increase_fac
     real(wp) :: accepted_step_size
     integer  :: trial_transforms
-    character(len=16) :: step_memory_source
     character :: reject_char(1)
 
     ! other variables
-    logical :: fexist
+    logical :: fexist,cuda_session_started
     integer :: alg
 
     ! set up variables based on input orbopt_data
@@ -127,9 +141,8 @@ module focas_driver
     r_increase_fac              = orbopt_data(21)
     if (r_increase_fac <= 0.0_wp) r_increase_fac = default_r_increase_fac
     focas_df_c1_cuda_enabled_   = int(orbopt_data(22))
-    focas_df_c1_cuda_validate_  = int(orbopt_data(23))
-    focas_df_c1_cuda_num_gpus_  = int(orbopt_data(24))
-    focas_df_c1_cuda_verbose_   = int(orbopt_data(25))
+    focas_df_c1_cuda_num_gpus_  = int(orbopt_data(23))
+    focas_compact_rotation_enabled_ = int(orbopt_data(24))
 
     if ( log_print_ == 1 ) then
       inquire(file=fname,exist=fexist)
@@ -139,10 +152,6 @@ module focas_driver
         open(fid_,file=fname,status='new')
       endif
       write(fid_,*)
-      write(fid_,'(a)') 'focas_run_begin'
-      write(fid_,'(a,4(1x,i6))') 'focas_cuda_config enabled validate num_gpus verbose', &
-           focas_df_c1_cuda_enabled_,focas_df_c1_cuda_validate_, &
-           focas_df_c1_cuda_num_gpus_,focas_df_c1_cuda_verbose_
     endif
 
     ! calculate the total number of orbitals in space
@@ -188,6 +197,24 @@ module focas_driver
     ! allocate intermediate matrices for DF integrals
     if ( df_vars_%use_df_teints == 1 ) call allocate_qint()
 
+    ! Keep each device's Q slice resident across the complete C1 FOCAS call
+    ! when every post-transform int2 consumer has a CUDA path.  Symmetry and
+    ! partial-feature cases retain host-authoritative per-operation behavior.
+    ! Session setup is optional: a nonzero status leaves all existing CUDA and
+    ! CPU fallbacks intact.
+    cuda_session_started = .false.
+    if ( df_vars_%use_df_teints == 1 .and. &
+         focas_df_c1_cuda_enabled_ /= 0 .and. &
+         focas_df_c1_blocked_enabled_ /= 0 .and. &
+         nirrep_ == 1 .and. &
+         df_vars_%Qstride == ngem_tot_ .and. &
+         nact_tot_ > 0 .and. next_tot_ > 0 ) then
+      cuda_session_status = hilbert_focas_df_cuda_session_begin( &
+           int(nmo_tot_,kind=c_int),int(df_vars_%nQ,kind=c_long_long),int2, &
+           int(focas_df_c1_cuda_num_gpus_,kind=c_int))
+      cuda_session_started = (cuda_session_status == 0)
+    end if
+
     ! **********************************************************************************
     ! *** at this point, everything is allocated and we are ready to do the optimization
     ! **********************************************************************************
@@ -195,11 +222,9 @@ module focas_driver
     ! initialize trust radius variables
     evaluate_gradient = 1
     if ( focas_step_memory_enabled() .and. focas_step_memory_matches(alg) ) then
-      step_size_factor   = max(min_step_size,min(1.0_wp,focas_step_memory_factor_))
-      step_memory_source = 'warm_start'
+      step_size_factor = max(min_step_size,min(1.0_wp,focas_step_memory_factor_))
     else
-      step_size_factor   = 1.0_wp
-      step_memory_source = 'default'
+      step_size_factor = 1.0_wp
     end if
     accepted_step_size = step_size_factor
 
@@ -207,60 +232,21 @@ module focas_driver
 
       write(fid_,*)
 
-      write(fid_,'(a,1x,a,1x,f8.3)') 'focas_step_memory',trim(step_memory_source),step_size_factor
-      write(fid_,'(a,1x,f8.3)') 'focas_step_increase_factor',r_increase_fac
-
       write(fid_,'((a4,1x),(a16,1x),(a10),(2x),2(a10,1x),1(a4,1x),(a3,1x),(a9,1x),(a8,1x),2(a11,1x),2(a11,1x),(a5,1x),(a8,1x))') &
                 & 'iter','E(k)','dE','||g||','max|g|','type','sym','(i,j)','R_step',     &
                 & 'twall_trans','tcpu_trans','twall_aux','tcpu_other','ntry','R_next'
 
       write(fid_,'(a)')('-----------------------------------------------------------------&
                        & -----------------------------------------------------------------')
-      write(fid_,'(a)') 'focas_detail columns: iter exp oei tei mocoeff energy gradient hessian aux_total trans_total'
-      write(fid_,'(a)') 'focas_gradient_detail columns: iter fi_coul fi_exch fa_coul fa_exch q z assemble total'
-
     end if
 
     ! calculate current energy and gradient
     ! frozen doubly occupied orbitals zeroed in gradient calculation
 
-    t_wall_energy = 0.0_wp
-    t_cpu_energy  = 0.0_wp
-    t_wall_gradient = 0.0_wp
-    t_cpu_gradient  = 0.0_wp
-    t_wall_hessian = 0.0_wp
-    t_cpu_hessian  = 0.0_wp
     ! build GPU Fock matrices via orbital_gradient first, then derive energy cheaply
-    t0 = timer()
     call orbital_gradient(int1,int2,den1,den2)
-    t1 = timer()
-    t_wall_gradient = t1(1) - t0(1)
-    t_cpu_gradient  = t1(2) - t0(2)
-    t_wall_grad_fi_coul = focas_gradient_fi_coul_wall_
-    t_wall_grad_fi_exch = focas_gradient_fi_exch_wall_
-    t_wall_grad_fa_coul = focas_gradient_fa_coul_wall_
-    t_wall_grad_fa_exch = focas_gradient_fa_exch_wall_
-    t_wall_grad_q = focas_gradient_q_wall_
-    t_wall_grad_z = focas_gradient_z_wall_
-    t_wall_grad_assemble = focas_gradient_assemble_wall_
-    t0 = timer()
     e_total_ = compute_energy_tindex(fock_i_%occ, fock_a_%occ, q_, z_, int1, den1)
-    t1 = timer()
-    t_wall_energy = t1(1) - t0(1)
-    t_cpu_energy  = t1(2) - t0(2)
-    t0 = timer()
     call diagonal_hessian(q_,z_,int2,den1,den2)
-    t1 = timer()
-    t_wall_hessian = t1(1) - t0(1)
-    t_cpu_hessian  = t1(2) - t0(2)
-    if ( log_print_ == 1 ) then
-      write(fid_,'(a,1x,3(1x,f11.3))') 'focas_initial_detail energy gradient hessian', &
-           t_wall_energy,t_wall_gradient,t_wall_hessian
-      write(fid_,'(a,7(1x,f11.3),1x,f11.3)') 'focas_initial_gradient_detail', &
-           t_wall_grad_fi_coul,t_wall_grad_fi_exch,t_wall_grad_fa_coul, &
-           t_wall_grad_fa_exch,t_wall_grad_q,t_wall_grad_z, &
-           t_wall_grad_assemble,t_wall_gradient
-    end if
 
     initial_energy = e_total_
     last_energy    = e_total_
@@ -307,36 +293,12 @@ module focas_driver
       t_cpu_trans  = 0.0_wp
       t_wall_aux   = 0.0_wp
       t_cpu_aux    = 0.0_wp
-      t_wall_exp   = 0.0_wp
-      t_cpu_exp    = 0.0_wp
-      t_wall_energy = 0.0_wp
-      t_cpu_energy  = 0.0_wp
-      t_wall_gradient = 0.0_wp
-      t_cpu_gradient  = 0.0_wp
-      t_wall_hessian = 0.0_wp
-      t_cpu_hessian  = 0.0_wp
-      t_wall_oei     = 0.0_wp
-      t_cpu_oei      = 0.0_wp
-      t_wall_tei     = 0.0_wp
-      t_cpu_tei      = 0.0_wp
-      t_wall_mocoeff = 0.0_wp
-      t_cpu_mocoeff  = 0.0_wp
-      t_wall_grad_fi_coul = 0.0_wp
-      t_wall_grad_fi_exch = 0.0_wp
-      t_wall_grad_fa_coul = 0.0_wp
-      t_wall_grad_fa_exch = 0.0_wp
-      t_wall_grad_q = 0.0_wp
-      t_wall_grad_z = 0.0_wp
-      t_wall_grad_assemble = 0.0_wp
-
       ! compute transformation matrix
       t0 = timer()
       call compute_exponential(sk_)
       t1 = timer()
       t_wall_aux = t_wall_aux + t1(1) - t0(1)
       t_cpu_aux  = t_cpu_aux  + t1(2) - t0(2)
-      t_wall_exp = t_wall_exp + t1(1) - t0(1)
-      t_cpu_exp  = t_cpu_exp  + t1(2) - t0(2)
 
       ! transform the integrals; xk = xk+alpha*dk
       t0 = timer()
@@ -344,12 +306,6 @@ module focas_driver
       t1 = timer()
       t_wall_trans = t_wall_trans + t1(1) - t0(1)
       t_cpu_trans  = t_cpu_trans  + t1(2) - t0(2)
-      t_wall_oei     = t_wall_oei     + focas_transform_oei_wall_
-      t_cpu_oei      = t_cpu_oei      + focas_transform_oei_cpu_
-      t_wall_tei     = t_wall_tei     + focas_transform_tei_wall_
-      t_cpu_tei      = t_cpu_tei      + focas_transform_tei_cpu_
-      t_wall_mocoeff = t_wall_mocoeff + focas_transform_mocoeff_wall_
-      t_cpu_mocoeff  = t_cpu_mocoeff  + focas_transform_mocoeff_cpu_
 
       ! calculate gradient (builds GPU Fock matrices) then derive energy from them
 
@@ -358,15 +314,6 @@ module focas_driver
       t1 = timer()
       t_wall_aux = t_wall_aux + t1(1) - t0(1)
       t_cpu_aux  = t_cpu_aux  + t1(2) - t0(2)
-      t_wall_gradient = t_wall_gradient + t1(1) - t0(1)
-      t_cpu_gradient  = t_cpu_gradient  + t1(2) - t0(2)
-      t_wall_grad_fi_coul = t_wall_grad_fi_coul + focas_gradient_fi_coul_wall_
-      t_wall_grad_fi_exch = t_wall_grad_fi_exch + focas_gradient_fi_exch_wall_
-      t_wall_grad_fa_coul = t_wall_grad_fa_coul + focas_gradient_fa_coul_wall_
-      t_wall_grad_fa_exch = t_wall_grad_fa_exch + focas_gradient_fa_exch_wall_
-      t_wall_grad_q = t_wall_grad_q + focas_gradient_q_wall_
-      t_wall_grad_z = t_wall_grad_z + focas_gradient_z_wall_
-      t_wall_grad_assemble = t_wall_grad_assemble + focas_gradient_assemble_wall_
       e_total_ = compute_energy_tindex(fock_i_%occ, fock_a_%occ, q_, z_, int1, den1)
 
       ! finish quadratic model
@@ -401,8 +348,6 @@ module focas_driver
           t1 = timer()
           t_wall_aux = t_wall_aux + t1(1) - t0(1)
           t_cpu_aux  = t_cpu_aux  + t1(2) - t0(2)
-          t_wall_exp = t_wall_exp + t1(1) - t0(1)
-          t_cpu_exp  = t_cpu_exp  + t1(2) - t0(2)
 
           ! transform the integrals; xk = xk+sk_
           t0 = timer()
@@ -410,12 +355,6 @@ module focas_driver
           t1 = timer()
           t_wall_trans = t_wall_trans + t1(1) - t0(1)
           t_cpu_trans  = t_cpu_trans  + t1(2) - t0(2)
-          t_wall_oei     = t_wall_oei     + focas_transform_oei_wall_
-          t_cpu_oei      = t_cpu_oei      + focas_transform_oei_cpu_
-          t_wall_tei     = t_wall_tei     + focas_transform_tei_wall_
-          t_cpu_tei      = t_cpu_tei      + focas_transform_tei_cpu_
-          t_wall_mocoeff = t_wall_mocoeff + focas_transform_mocoeff_wall_
-          t_cpu_mocoeff  = t_cpu_mocoeff  + focas_transform_mocoeff_cpu_
           trial_transforms = trial_transforms + 1
 
           ! calculate gradient and energy at the minimizer point
@@ -424,15 +363,6 @@ module focas_driver
           t1 = timer()
           t_wall_aux = t_wall_aux + t1(1) - t0(1)
           t_cpu_aux  = t_cpu_aux  + t1(2) - t0(2)
-          t_wall_gradient = t_wall_gradient + t1(1) - t0(1)
-          t_cpu_gradient  = t_cpu_gradient  + t1(2) - t0(2)
-          t_wall_grad_fi_coul = t_wall_grad_fi_coul + focas_gradient_fi_coul_wall_
-          t_wall_grad_fi_exch = t_wall_grad_fi_exch + focas_gradient_fi_exch_wall_
-          t_wall_grad_fa_coul = t_wall_grad_fa_coul + focas_gradient_fa_coul_wall_
-          t_wall_grad_fa_exch = t_wall_grad_fa_exch + focas_gradient_fa_exch_wall_
-          t_wall_grad_q = t_wall_grad_q + focas_gradient_q_wall_
-          t_wall_grad_z = t_wall_grad_z + focas_gradient_z_wall_
-          t_wall_grad_assemble = t_wall_grad_assemble + focas_gradient_assemble_wall_
           e_total_ = compute_energy_tindex(fock_i_%occ, fock_a_%occ, q_, z_, int1, den1)
 
         end if
@@ -462,13 +392,6 @@ module focas_driver
              iter,e_total_,delta_energy,grad_norm_,maxval(abs(orbital_gradient_)), &
              'step','-','-',alpha,t_wall_trans,t_cpu_trans,t_wall_aux,t_cpu_aux, &
              trial_transforms,step_size_factor
-        write(fid_,'(a,1x,i4,9(1x,f11.3))') 'focas_detail',iter, &
-             t_wall_exp,t_wall_oei,t_wall_tei,t_wall_mocoeff, &
-             t_wall_energy,t_wall_gradient,t_wall_hessian,t_wall_aux,t_wall_trans
-        write(fid_,'(a,1x,i4,8(1x,f11.3))') 'focas_gradient_detail',iter, &
-             t_wall_grad_fi_coul,t_wall_grad_fi_exch, &
-             t_wall_grad_fa_coul,t_wall_grad_fa_exch, &
-             t_wall_grad_q,t_wall_grad_z,t_wall_grad_assemble,t_wall_gradient
       end if
       if (( abs(delta_energy) <= delta_energy_tolerance ) .and. (grad_norm_ <= gradient_norm_tolerance)) then
         converged = 1
@@ -581,6 +504,12 @@ module focas_driver
       focas_step_memory_df_     = df_vars_%use_df_teints
       focas_step_memory_alg_    = alg
       focas_step_memory_valid_  = .true.
+    end if
+
+    if ( cuda_session_started ) then
+      cuda_session_status = hilbert_focas_df_cuda_session_end( &
+           int2,1_c_int)
+      if ( cuda_session_status /= 0 ) call abort_print(33)
     end if
 
     ! deallocate indexing arrays

@@ -551,17 +551,21 @@ void v2RDMSolver::ComputeNaturalOrbitals() {
 
         if ( is_df_ ) {
             free(Qmo_);
+            Qmo_ = nullptr;
 
             double start = omp_get_wtime();
-            ThreeIndexIntegrals(reference_wavefunction_,nQ_,memory_);
-
-            Qmo_ = (double*)malloc(nmo_*(nmo_+1)/2*nQ_*sizeof(double));
-            memset((void*)Qmo_,'\0',nmo_*(nmo_+1)/2*nQ_*sizeof(double));
-
-            std::shared_ptr<PSIO> psio(new PSIO());
-            psio->open(PSIF_DCC_QMO,PSIO_OPEN_OLD);
-            psio->read_entry(PSIF_DCC_QMO,"(Q|mn) Integrals",(char*)Qmo_,sizeof(double)*nQ_ * nmo_*(nmo_+1)/2);
-            psio->close(PSIF_DCC_QMO,1);
+            DirectThreeIndexOptions transform_options;
+            transform_options.backend = options_.get_str("DF_INTEGRAL_TRANSFORM_BACKEND");
+            transform_options.block_q = options_.get_int("DF_INTEGRAL_TRANSFORM_BLOCK_Q");
+            transform_options.block_q_max = options_.get_int("DF_INTEGRAL_TRANSFORM_BLOCK_Q_MAX");
+            transform_options.memory_fraction = options_.get_double("DF_INTEGRAL_TRANSFORM_MEMORY_FRACTION");
+            transform_options.use_available_memory = options_.get_bool("DF_INTEGRAL_TRANSFORM_USE_AVAILABLE_MEMORY");
+            transform_options.cuda_num_gpus = options_.get_int("DF_INTEGRAL_TRANSFORM_CUDA_NUM_GPUS");
+            ThreeIndexIntegralsDirect(reference_wavefunction_, nQ_, memory_,
+                                      nmo_ - nfrzv_, Qmo_,
+                                      transform_options);
+            outfile->Printf("        Time for natural-orbital DF transformation: %.2f s\n",
+                            omp_get_wtime() - start);
 
         }else {
             std::vector<std::shared_ptr<MOSpace> > spaces;
@@ -626,4 +630,3 @@ void v2RDMSolver::PrintNaturalOrbitalOccupations() {
 
 
 } // End namespaces
-

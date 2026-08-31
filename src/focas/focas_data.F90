@@ -92,10 +92,13 @@ module focas_data
     integer, allocatable :: U_eq_I(:)                              ! flag for the type of U matrix (==1 U==I and ==0 U/=I)                       
     integer, allocatable :: npairpi(:)                             ! number of orbital rotation pairs per irrep
     integer, allocatable :: nmopi(:)                               ! number of orbitals per irrep
+    integer, allocatable :: compact_rank(:)                        ! rank of the exact U-I representation for each irrep
     integer, allocatable :: offset(:)                              ! first index of orbital (with a given symmetry) in the irrep_to_class_map array
     integer, allocatable :: irrep_to_class_map(:)                  ! mapping array to map symmetry-reduced index to class-index
     integer, allocatable :: class_to_irrep_map(:)                  ! mapping array to map class-index to symmetry-reduced index
     type(matrix_block), allocatable :: u_irrep_block(:)            ! transformation matrix for a symmetry block
+    type(matrix_block), allocatable :: compact_v(:)                ! orthonormal basis V spanning range(K), U=I+V*A*V^T
+    type(matrix_block), allocatable :: compact_a(:)                ! projected exponential minus identity, A=exp(V^T*K*V)-I
   end type trans_info
 
   type rot_info
@@ -207,14 +210,14 @@ module focas_data
   integer :: use_exact_hessian_diagonal_                           ! flag to use exact expressions for the diagonal elements of the Hessian
   integer :: num_diis_vectors_
   integer :: focas_step_memory_enabled_ = 1                        ! 1/0 = enable/disable FOCAS step-size warm start
+  integer :: focas_compact_rotation_enabled_ = 1                   ! 1/0 = use exact compact exponential and DF update when profitable
   integer :: focas_df_c1_blocked_enabled_ = 1                      ! 1/0 = enable/disable C1 blocked DF transform
   integer :: focas_df_c1_block_q_ = 0                              ! <=0 = automatic C1 blocked DF transform batch size
   integer :: focas_df_c1_block_memory_mib_ = 0                     ! total MiB scratch budget for automatic C1 blocked DF transform
   integer :: focas_df_c1_block_q_max_ = 32                         ! maximum automatic C1 blocked DF transform batch size
   integer :: focas_df_c1_cuda_enabled_ = 0                         ! 1/0 = enable/disable optional CUDA C1 blocked DF transform
-  integer :: focas_df_c1_cuda_validate_ = 0                        ! 1/0 = validate CUDA transform against CPU transform
   integer :: focas_df_c1_cuda_num_gpus_ = 0                        ! <=0 = use all visible GPUs
-  integer :: focas_df_c1_cuda_verbose_ = 0                         ! 1/0 = print CUDA JIT compile/load diagnostics
+  integer, parameter :: focas_cuda_session_fatal_status_ = 290    ! resident tensor state cannot safely fall back to CPU
  
   ! *** doubles
   real(wp) :: e1_c_                                                ! core contribution to 1-e energy
@@ -230,20 +233,6 @@ module focas_data
   real(wp) :: e_active_                                            ! active space energy
   real(wp) :: grad_norm_                                           ! norm of the gradient ddot(g,g)
   real(wp) :: min_diag_hessian_                                    ! smallest diagonal Hessian element
-  real(wp) :: focas_transform_oei_wall_ = 0.0_wp                   ! most recent 1-e integral transform wall time
-  real(wp) :: focas_transform_tei_wall_ = 0.0_wp                   ! most recent 2-e integral transform wall time
-  real(wp) :: focas_transform_mocoeff_wall_ = 0.0_wp               ! most recent MO coefficient transform wall time
-  real(wp) :: focas_transform_oei_cpu_ = 0.0_wp                    ! most recent 1-e integral transform CPU time
-  real(wp) :: focas_transform_tei_cpu_ = 0.0_wp                    ! most recent 2-e integral transform CPU time
-  real(wp) :: focas_transform_mocoeff_cpu_ = 0.0_wp                ! most recent MO coefficient transform CPU time
-  real(wp) :: focas_gradient_fi_coul_wall_ = 0.0_wp                ! most recent inactive Fock Coulomb wall time
-  real(wp) :: focas_gradient_fi_exch_wall_ = 0.0_wp                ! most recent inactive Fock exchange wall time
-  real(wp) :: focas_gradient_fa_coul_wall_ = 0.0_wp                ! most recent active Fock Coulomb wall time
-  real(wp) :: focas_gradient_fa_exch_wall_ = 0.0_wp                ! most recent active Fock exchange wall time
-  real(wp) :: focas_gradient_q_wall_ = 0.0_wp                      ! most recent Q intermediate wall time
-  real(wp) :: focas_gradient_z_wall_ = 0.0_wp                      ! most recent Z intermediate wall time
-  real(wp) :: focas_gradient_assemble_wall_ = 0.0_wp               ! most recent orbital gradient assembly wall time
-
   real(wp) :: max_grad_val_                                        ! largest gradient element
   real(wp) :: norm_grad_large_                                     ! total norm of large gradient elements 
   integer :: max_grad_ind_(2)                                      ! orbitalindeces for largest gradient element
@@ -617,6 +606,8 @@ module focas_data
       if (error_code == 31) write(*,'(a)')'error encountered in function transform_teints()'
 
       if (error_code == 32) write(*,'(a)')'error encountered in function transform_mocoeff()'
+
+      if (error_code == 33) write(*,'(a)')'unrecoverable error in resident FOCAS CUDA session'
 
       if (error_code == 311) write(*,'(a)')'error encountered in function transform_teints_irrep_block()'
 
