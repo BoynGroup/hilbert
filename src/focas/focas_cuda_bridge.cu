@@ -4,11 +4,14 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdarg>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -17,6 +20,52 @@ namespace {
 constexpr int kResidentSessionFatal = 290;
 constexpr std::size_t kPinnedResidentUploadThreshold =
     static_cast<std::size_t>(8) << 30;
+
+// Streamed (non-resident) Q tiles above this size go through the pooled pinned
+// double-buffered staging path.  Below it the driver-managed pageable copy is
+// competitive and avoids an extra host memcpy.
+constexpr std::size_t kPinnedStreamTileThreshold =
+    static_cast<std::size_t>(32) * 1024 * 1024;
+
+// Absolute floor on the device memory held back from DF residency.
+constexpr std::size_t kMinWorkingReserve = static_cast<std::size_t>(4) << 30;
+
+// Q rows assumed in flight when sizing the working reserve.  This is the chunk
+// depth the transform/gradient kernels are expected to use; it only sets how
+// much memory is held back, never how much is actually processed at once.
+constexpr double kReserveBlockQ = 32.0;
+
+// ---------------------------------------------------------------------------
+// Diagnostics.  This path is meant to stay on the GPU, so every host fallback
+// and every residency decision that costs PCIe bandwidth is announced.  Notices
+// are de-duplicated because the gradient operators run hundreds of times per
+// optimization; without that a real warning would be buried.
+// ---------------------------------------------------------------------------
+std::mutex focas_notice_mutex;
+std::vector<std::string> focas_notice_seen;
+
+void focas_notice(const char *fmt, ...) {
+  char message[512];
+  va_list args;
+  va_start(args, fmt);
+  std::vsnprintf(message, sizeof(message), fmt, args);
+  va_end(args);
+  {
+    std::lock_guard<std::mutex> lock(focas_notice_mutex);
+    for (const auto &seen : focas_notice_seen) {
+      if (seen == message) {
+        return;
+      }
+    }
+    focas_notice_seen.emplace_back(message);
+  }
+  std::fprintf(stderr, "  ==> [FOCAS-GPU] %s\n", message);
+  std::fflush(stderr);
+}
+
+double to_gib(std::size_t bytes) {
+  return static_cast<double>(bytes) / static_cast<double>(1ull << 30);
+}
 
 // A FOCAS orbital-optimization session spans the initial gradient, all trial
 // rotations, and the final gradient.  When a device has enough free memory we
@@ -27,10 +76,25 @@ struct FocasSessionDevice {
   int device = -1;
   long long q_begin = 0;
   long long q_end = 0;
+  // Residency is partial: rows [q_begin, q_res_end) live on the device for the
+  // whole session and are authoritative once a transform has run; rows
+  // [q_res_end, q_end) stay on the host and are streamed per tile.  When
+  // q_res_end == q_begin nothing is resident, when it equals q_end the slice is
+  // fully resident (the historical all-or-nothing behaviour).
+  long long q_res_end = 0;
   double *d_int2 = nullptr;
   std::size_t int2_bytes = 0;
   unsigned char *workspace = nullptr;
   std::size_t workspace_bytes = 0;
+
+  bool has_resident_rows() const {
+    return d_int2 != nullptr && q_res_end > q_begin;
+  }
+  // A tile is resident only when it lies wholly inside the prefix; callers clamp
+  // tiles to the boundary so this never splits one.
+  bool tile_resident(long long q, long long count) const {
+    return has_resident_rows() && q >= q_begin && q + count <= q_res_end;
+  }
 };
 
 struct FocasSession {
@@ -108,14 +172,75 @@ FocasSessionDevice *session_device_slice(int device, const double *host_int2,
   return nullptr;
 }
 
+// True when the slice keeps only part of its Q range on the device, so the
+// caller must also provide staging space for the streamed remainder.
+bool slice_is_partial(const FocasSessionDevice *resident, long long q_end) {
+  return resident != nullptr && resident->q_res_end < q_end;
+}
+
+// True only when the slice keeps its whole Q range on the device.  The chunk
+// choosers size their per-Q working set from this: a fully resident slice needs
+// no staging, while a partially resident one still pays ngem doubles per Q row
+// for the streamed tiles and must be sized like the non-resident case.
+bool slice_is_fully_resident(const FocasSessionDevice *resident,
+                             long long q_end) {
+  return resident != nullptr && resident->q_res_end >= q_end;
+}
+
+// Scratch a partially resident slice needs to land one streamed tile.
+std::size_t streaming_stage_bytes(const FocasSessionDevice *resident,
+                                  long long q_end, int q_chunk,
+                                  long long ngem) {
+  if (!slice_is_partial(resident, q_end))
+    return 0;
+  return static_cast<std::size_t>(q_chunk) * static_cast<std::size_t>(ngem) *
+         sizeof(double);
+}
+
+// Device memory held back from DF residency.  A fraction of the card says
+// nothing about the calculation being run, so size the reserve from the problem:
+// the transform and gradient kernels allocate up to four rectangular nmo*nmo
+// blocks per Q row in flight plus the nmo*nmo rotation matrix and accumulators.
+// A small fractional margin is kept on top for the co-resident GPU_ADMM solver,
+// whose caching allocator can grow its pool between macrocycles.  Because
+// residency is now partial, being generous here costs a little streaming rather
+// than the whole tensor, so the reserve is allowed to be safe.
+std::size_t focas_working_reserve_bytes(int nmo, std::size_t free_bytes) {
+  const double nmo2 = static_cast<double>(nmo) * static_cast<double>(nmo);
+  const double per_q_bytes = 4.0 * nmo2 * sizeof(double);
+  const double fixed_bytes = 2.0 * nmo2 * sizeof(double);
+  const double working = fixed_bytes + kReserveBlockQ * per_q_bytes;
+  const double co_tenant_margin = 0.10 * static_cast<double>(free_bytes);
+  const double reserve =
+      std::max({static_cast<double>(kMinWorkingReserve), 1.5 * working,
+                co_tenant_margin});
+  return static_cast<std::size_t>(reserve);
+}
+
+// Shrink a tile so it never straddles the residency boundary.  Every tile is
+// then either wholly resident or wholly streamed, which keeps the transform's
+// write-back unambiguous: a straddling tile would otherwise be written to the
+// host while its leading rows stayed authoritative (and now stale) on device.
+int clamp_tile_to_residency(const FocasSessionDevice *resident, long long q,
+                            int bq) {
+  if (resident == nullptr || !resident->has_resident_rows())
+    return bq;
+  const long long res_end = resident->q_res_end;
+  if (q < res_end && q + bq > res_end) {
+    return static_cast<int>(res_end - q);
+  }
+  return bq;
+}
+
 bool session_has_resident_slices(const double *host_int2, long long ngem) {
   if (!focas_session.active || focas_session.host_int2 != host_int2 ||
       focas_session.ngem != ngem) {
     return false;
   }
-  return std::any_of(
-      focas_session.devices.begin(), focas_session.devices.end(),
-      [](const FocasSessionDevice &entry) { return entry.d_int2 != nullptr; });
+  return std::any_of(focas_session.devices.begin(), focas_session.devices.end(),
+                     [](const FocasSessionDevice &entry) {
+                       return entry.has_resident_rows();
+                     });
 }
 
 bool session_is_fully_resident(const double *host_int2, long long ngem,
@@ -126,8 +251,10 @@ bool session_is_fully_resident(const double *host_int2, long long ngem,
   }
   long long next_q = 0;
   for (const auto &entry : focas_session.devices) {
+    // Fully resident requires the device copy to cover the slice completely;
+    // a partially resident slice leaves the host authoritative for its tail.
     if (entry.d_int2 == nullptr || entry.q_begin != next_q ||
-        entry.q_end < entry.q_begin) {
+        entry.q_end < entry.q_begin || entry.q_res_end != entry.q_end) {
       return false;
     }
     next_q = entry.q_end;
@@ -649,13 +776,43 @@ private:
   bool active_ = false;
 };
 
+// Upload one streamed Q tile.  Tiles large enough to amortize the extra host
+// copy go through the pooled pinned double-buffered path, which overlaps the
+// host memcpy of one 64 MiB chunk with the DMA of the previous one; smaller
+// tiles keep the driver-managed pageable copy.
+cudaError_t upload_stream_tile(int device, double *device_block,
+                               const double *host_block, std::size_t bytes) {
+  if (bytes >= kPinnedStreamTileThreshold) {
+    PinnedStagingLease lease(device, bytes);
+    if (lease.enabled()) {
+      // The staging copies run on cudaStreamNonBlocking streams, which by
+      // definition are NOT ordered against the default stream that the
+      // contraction kernels and cuBLAS calls use.  copy_h2d waits for its own
+      // streams, but nothing waits for the previous tile's kernels, which are
+      // still reading this very buffer -- a write-after-read race that silently
+      // corrupts results once the per-tile GPU work outlives the next upload.
+      // The synchronous cudaMemcpy fallback below does not need this because it
+      // orders against the default stream itself.
+      const cudaError_t pending = cudaStreamSynchronize(0);
+      if (pending != cudaSuccess) {
+        return pending;
+      }
+      return lease.staging().copy_h2d(device_block, host_block, bytes);
+    }
+  }
+  return cudaMemcpy(device_block, host_block, bytes, cudaMemcpyHostToDevice);
+}
+
 int copy_resident_slices_to_host_locked(double *host_int2) {
   if (!focas_session.active || host_int2 == nullptr ||
       focas_session.host_int2 != host_int2) {
     return 233;
   }
   for (auto &entry : focas_session.devices) {
-    if (entry.d_int2 == nullptr)
+    // Only the resident prefix can be newer than the host: streamed tiles are
+    // written back as they are produced, so int2_bytes covers exactly the rows
+    // [q_begin, q_res_end) that live on the device.
+    if (!entry.has_resident_rows())
       continue;
     if (cudaSetDevice(entry.device) != cudaSuccess) {
       return 233;
@@ -954,7 +1111,8 @@ int process_range_on_device(int device, int nmo, long long q_begin,
 
   const int block_q = choose_block_q(
       device, nmo, q_end - q_begin, ngem, requested_block_q,
-      resident != nullptr, resident == nullptr ? 0 : resident->workspace_bytes);
+      slice_is_fully_resident(resident, q_end),
+      resident == nullptr ? 0 : resident->workspace_bytes);
   const int nrow = nmo * block_q;
   const std::size_t u_bytes =
       static_cast<std::size_t>(nmo) * nmo * sizeof(double);
@@ -963,12 +1121,16 @@ int process_range_on_device(int device, int nmo, long long q_begin,
   const std::size_t rectangular_bytes =
       static_cast<std::size_t>(nrow) * nmo * sizeof(double);
   const std::size_t left_bytes = rectangular_bytes;
+  // A partially resident slice still needs somewhere to land its streamed tiles.
+  const std::size_t stage_bytes =
+      streaming_stage_bytes(resident, q_end, block_q, ngem);
   const std::size_t operation_workspace_bytes =
       u_bytes + (resident == nullptr ? packed_bytes : 0) +
       4 * rectangular_bytes;
 
   double *d_u = nullptr;
   double *d_packed = nullptr;
+  double *d_stage = nullptr;
   double *d_right = nullptr;
   double *d_tmp = nullptr;
   double *d_left = nullptr;
@@ -992,8 +1154,8 @@ int process_range_on_device(int device, int nmo, long long q_begin,
   };
   if (resident != nullptr) {
     d_packed = resident->d_int2;
-    pooled_workspace =
-        ensure_session_workspace(resident, u_bytes + 4 * rectangular_bytes);
+    pooled_workspace = ensure_session_workspace(
+        resident, u_bytes + 4 * rectangular_bytes + stage_bytes);
     if (pooled_workspace) {
       unsigned char *cursor = resident->workspace;
       d_u = take_workspace<double>(cursor, u_bytes / sizeof(double));
@@ -1003,6 +1165,9 @@ int process_range_on_device(int device, int nmo, long long q_begin,
           take_workspace<double>(cursor, rectangular_bytes / sizeof(double));
       d_left = take_workspace<double>(cursor, left_bytes / sizeof(double));
       d_result = take_workspace<double>(cursor, left_bytes / sizeof(double));
+      if (stage_bytes > 0) {
+        d_stage = take_workspace<double>(cursor, stage_bytes / sizeof(double));
+      }
     }
   }
   if ((resident != nullptr && !pooled_workspace) ||
@@ -1025,18 +1190,24 @@ int process_range_on_device(int device, int nmo, long long q_begin,
   const double beta = 0.0;
   constexpr int threads = 256;
 
-  for (long long q = q_begin; q < q_end; q += block_q) {
-    const int bq = static_cast<int>(std::min<long long>(block_q, q_end - q));
+  for (long long q = q_begin; q < q_end;) {
+    int bq = static_cast<int>(std::min<long long>(block_q, q_end - q));
+    bq = clamp_tile_to_residency(resident, q, bq);
+    const bool tile_resident =
+        resident != nullptr && resident->tile_resident(q, bq);
     const int nrow_bq = nmo * bq;
     const std::size_t packed_bq_bytes =
         static_cast<std::size_t>(bq) * ngem * sizeof(double);
     double *host_block = int2 + q * ngem;
+    // Resident tiles are transformed in place and stay authoritative on the
+    // device; streamed tiles land in the staging buffer and are written back.
     double *device_block =
-        resident == nullptr ? d_packed : d_packed + (q - q_begin) * ngem;
+        tile_resident ? resident->d_int2 + (q - resident->q_begin) * ngem
+                      : (resident == nullptr ? d_packed : d_stage);
 
-    if (resident == nullptr) {
-      if (cudaMemcpy(device_block, host_block, packed_bq_bytes,
-                     cudaMemcpyHostToDevice) != cudaSuccess) {
+    if (!tile_resident) {
+      if (upload_stream_tile(device, device_block, host_block,
+                             packed_bq_bytes) != cudaSuccess) {
         cleanup();
         return 14;
       }
@@ -1072,7 +1243,12 @@ int process_range_on_device(int device, int nmo, long long q_begin,
       return 18;
     }
 
-    if (resident != nullptr && tensor_mutated != nullptr) {
+    // A resident tile is rotated in place, so the authoritative copy is mutated
+    // by the scatter itself.  A streamed tile is scattered into staging memory
+    // and does not touch the authoritative host copy until the write-back
+    // below, so the flag is deferred until then: before it is set, a failure can
+    // still be recovered by discarding the session and retrying on the host.
+    if (tile_resident && tensor_mutated != nullptr) {
       tensor_mutated->store(true, std::memory_order_relaxed);
     }
     scatter_packed_symmetric_kernel<<<cuda_blocks(packed_total, threads),
@@ -1083,7 +1259,7 @@ int process_range_on_device(int device, int nmo, long long q_begin,
       return 19;
     }
 
-    if (resident == nullptr) {
+    if (!tile_resident) {
       if (tensor_mutated != nullptr) {
         tensor_mutated->store(true, std::memory_order_relaxed);
       }
@@ -1093,6 +1269,7 @@ int process_range_on_device(int device, int nmo, long long q_begin,
         return 20;
       }
     }
+    q += bq;
   }
 
   if (cudaDeviceSynchronize() != cudaSuccess) {
@@ -1122,7 +1299,8 @@ int process_low_rank_range_on_device(int device, int nmo, int rank,
       session_device_slice(device, int2, ngem, q_begin, q_end);
   const int block_q = choose_low_rank_block_q(
       device, nmo, rank, q_end - q_begin, ngem, requested_block_q,
-      resident != nullptr, resident == nullptr ? 0 : resident->workspace_bytes);
+      slice_is_fully_resident(resident, q_end),
+      resident == nullptr ? 0 : resident->workspace_bytes);
 
   const std::size_t n = static_cast<std::size_t>(nmo);
   const std::size_t r = static_cast<std::size_t>(rank);
@@ -1139,8 +1317,11 @@ int process_low_rank_range_on_device(int device, int nmo, int rank,
   const std::size_t operation_workspace_bytes =
       (pooled_elements + (resident == nullptr ? packed_elements : 0)) *
       sizeof(double);
+  const std::size_t stage_bytes =
+      streaming_stage_bytes(resident, q_end, block_q, ngem);
 
   double *d_v = nullptr;
+  double *d_stage = nullptr;
   double *d_a = nullptr;
   double *d_packed = nullptr;
   double *d_dense = nullptr;
@@ -1171,8 +1352,8 @@ int process_low_rank_range_on_device(int device, int nmo, int rank,
   };
   if (resident != nullptr) {
     d_packed = resident->d_int2;
-    pooled_workspace =
-        ensure_session_workspace(resident, pooled_elements * sizeof(double));
+    pooled_workspace = ensure_session_workspace(
+        resident, pooled_elements * sizeof(double) + stage_bytes);
     if (pooled_workspace) {
       unsigned char *cursor = resident->workspace;
       d_v = take_workspace<double>(cursor, v_elements);
@@ -1182,6 +1363,9 @@ int process_low_rank_range_on_device(int device, int nmo, int rank,
       d_r = take_workspace<double>(cursor, rectangular_elements);
       d_z = take_workspace<double>(cursor, small_elements);
       d_small_tmp = take_workspace<double>(cursor, small_elements);
+      if (stage_bytes > 0) {
+        d_stage = take_workspace<double>(cursor, stage_bytes / sizeof(double));
+      }
     }
   }
   if ((resident != nullptr && !pooled_workspace) ||
@@ -1217,17 +1401,21 @@ int process_low_rank_range_on_device(int device, int nmo, int rank,
   const long long rectangular_stride = static_cast<long long>(n) * r;
   const long long small_stride = static_cast<long long>(r) * r;
 
-  for (long long q = q_begin; q < q_end; q += block_q) {
-    const int bq = static_cast<int>(std::min<long long>(block_q, q_end - q));
+  for (long long q = q_begin; q < q_end;) {
+    int bq = static_cast<int>(std::min<long long>(block_q, q_end - q));
+    bq = clamp_tile_to_residency(resident, q, bq);
+    const bool tile_resident =
+        resident != nullptr && resident->tile_resident(q, bq);
     const std::size_t packed_bq_bytes =
         static_cast<std::size_t>(bq) * ngem * sizeof(double);
     double *host_block = int2 + q * ngem;
     double *device_block =
-        resident == nullptr ? d_packed : d_packed + (q - q_begin) * ngem;
+        tile_resident ? d_packed + (q - resident->q_begin) * ngem
+                      : (resident == nullptr ? d_packed : d_stage);
 
-    if (resident == nullptr) {
-      if (cudaMemcpy(device_block, host_block, packed_bq_bytes,
-                     cudaMemcpyHostToDevice) != cudaSuccess) {
+    if (!tile_resident) {
+      if (upload_stream_tile(device, device_block, host_block,
+                             packed_bq_bytes) != cudaSuccess) {
         cleanup();
         return 34;
       }
@@ -1290,7 +1478,7 @@ int process_low_rank_range_on_device(int device, int nmo, int rank,
       return 40;
     }
 
-    if (resident != nullptr && tensor_mutated != nullptr) {
+    if (tile_resident && tensor_mutated != nullptr) {
       tensor_mutated->store(true, std::memory_order_relaxed);
     }
     scatter_low_rank_update_kernel<<<cuda_blocks(packed_total, threads),
@@ -1301,7 +1489,7 @@ int process_low_rank_range_on_device(int device, int nmo, int rank,
       return 41;
     }
 
-    if (resident == nullptr) {
+    if (!tile_resident) {
       if (tensor_mutated != nullptr) {
         tensor_mutated->store(true, std::memory_order_relaxed);
       }
@@ -1311,6 +1499,7 @@ int process_low_rank_range_on_device(int device, int nmo, int rank,
         return 42;
       }
     }
+    q += bq;
   }
 
   if (cudaDeviceSynchronize() != cudaSuccess) {
@@ -1481,7 +1670,8 @@ int compute_fi_exchange_on_device(int device, int nmo, int ndoc, long long nQ,
 
   const int q_chunk = choose_gradient_q_chunk(
       device, nmo, ndoc, q_end - q_begin, ngem, 1, requested_q_chunk,
-      resident != nullptr, resident == nullptr ? 0 : resident->workspace_bytes);
+      slice_is_fully_resident(resident, q_end),
+      resident == nullptr ? 0 : resident->workspace_bytes);
   const int max_ldx_ll = static_cast<int>(std::min<long long>(
       static_cast<long long>(q_chunk) * ndoc, std::numeric_limits<int>::max()));
   if (max_ldx_ll != static_cast<long long>(q_chunk) * ndoc) {
@@ -1498,7 +1688,11 @@ int compute_fi_exchange_on_device(int device, int nmo, int ndoc, long long nQ,
   const std::size_t inner_bytes =
       doc_df == nullptr ? 0 : static_cast<std::size_t>(ndoc) * sizeof(int);
 
+  const std::size_t stage_bytes =
+      streaming_stage_bytes(resident, q_end, q_chunk, ngem);
+
   double *d_int2 = nullptr;
+  double *d_stage = nullptr;
   double *d_x = nullptr;
   double *d_c = nullptr;
   int *d_inner = nullptr;
@@ -1516,14 +1710,17 @@ int compute_fi_exchange_on_device(int device, int nmo, int ndoc, long long nQ,
   };
   if (resident != nullptr) {
     d_int2 = resident->d_int2;
-    pooled_workspace =
-        ensure_session_workspace(resident, x_bytes + c_bytes + inner_bytes);
+    pooled_workspace = ensure_session_workspace(
+        resident, x_bytes + c_bytes + inner_bytes + stage_bytes);
     if (pooled_workspace) {
       unsigned char *cursor = resident->workspace;
       d_x = take_workspace<double>(cursor, x_bytes / sizeof(double));
       d_c = take_workspace<double>(cursor, c_bytes / sizeof(double));
       if (inner_bytes > 0) {
         d_inner = take_workspace<int>(cursor, inner_bytes / sizeof(int));
+      }
+      if (stage_bytes > 0) {
+        d_stage = take_workspace<double>(cursor, stage_bytes / sizeof(double));
       }
     }
   }
@@ -1555,16 +1752,20 @@ int compute_fi_exchange_on_device(int device, int nmo, int ndoc, long long nQ,
   constexpr int threads = 256;
   const double alpha = 1.0;
   const double beta = 1.0;
-  for (long long q = q_begin; q < q_end; q += q_chunk) {
-    const int bq = static_cast<int>(std::min<long long>(q_chunk, q_end - q));
+  for (long long q = q_begin; q < q_end;) {
+    int bq = static_cast<int>(std::min<long long>(q_chunk, q_end - q));
+    bq = clamp_tile_to_residency(resident, q, bq);
+    const bool tile_resident =
+        resident != nullptr && resident->tile_resident(q, bq);
     const int ldx = bq * ndoc;
     const std::size_t int2_bq_bytes =
         static_cast<std::size_t>(bq) * ngem * sizeof(double);
+    double *const stage_block = resident == nullptr ? d_int2 : d_stage;
     const double *device_block =
-        resident == nullptr ? d_int2 : d_int2 + (q - q_begin) * ngem;
-    if (resident == nullptr) {
-      if (cudaMemcpy(d_int2, int2 + q * ngem, int2_bq_bytes,
-                     cudaMemcpyHostToDevice) != cudaSuccess) {
+        tile_resident ? d_int2 + (q - resident->q_begin) * ngem : stage_block;
+    if (!tile_resident) {
+      if (upload_stream_tile(device, stage_block, int2 + q * ngem,
+                             int2_bq_bytes) != cudaSuccess) {
         cleanup();
         return 35;
       }
@@ -1588,6 +1789,7 @@ int compute_fi_exchange_on_device(int device, int nmo, int ndoc, long long nQ,
       cleanup();
       return 37;
     }
+    q += bq;
   }
   if (cudaMemcpy(host_c.data(), d_c, c_bytes, cudaMemcpyDeviceToHost) !=
       cudaSuccess) {
@@ -1627,7 +1829,8 @@ int compute_fa_exchange_on_device(int device, int nmo, int ndoc, int nact,
 
   const int q_chunk = choose_gradient_q_chunk(
       device, nmo, nact, q_end - q_begin, ngem, 2, requested_q_chunk,
-      resident != nullptr, resident == nullptr ? 0 : resident->workspace_bytes);
+      slice_is_fully_resident(resident, q_end),
+      resident == nullptr ? 0 : resident->workspace_bytes);
   const long long max_ldx_ll = static_cast<long long>(q_chunk) * nact;
   if (max_ldx_ll > std::numeric_limits<int>::max()) {
     cublasDestroy(handle);
@@ -1644,8 +1847,11 @@ int compute_fa_exchange_on_device(int device, int nmo, int ndoc, int nact,
       static_cast<std::size_t>(nact) * (nact + 1) / 2 * sizeof(double);
   const std::size_t inner_bytes =
       act_df == nullptr ? 0 : static_cast<std::size_t>(nact) * sizeof(int);
+  const std::size_t stage_bytes =
+      streaming_stage_bytes(resident, q_end, q_chunk, ngem);
 
   double *d_int2 = nullptr;
+  double *d_stage = nullptr;
   double *d_x = nullptr;
   double *d_y = nullptr;
   double *d_c = nullptr;
@@ -1670,7 +1876,8 @@ int compute_fa_exchange_on_device(int device, int nmo, int ndoc, int nact,
   if (resident != nullptr) {
     d_int2 = resident->d_int2;
     pooled_workspace = ensure_session_workspace(
-        resident, 2 * x_bytes + c_bytes + den_bytes + inner_bytes);
+        resident,
+        2 * x_bytes + c_bytes + den_bytes + inner_bytes + stage_bytes);
     if (pooled_workspace) {
       unsigned char *cursor = resident->workspace;
       d_x = take_workspace<double>(cursor, x_bytes / sizeof(double));
@@ -1679,6 +1886,9 @@ int compute_fa_exchange_on_device(int device, int nmo, int ndoc, int nact,
       d_den1 = take_workspace<double>(cursor, den_bytes / sizeof(double));
       if (inner_bytes > 0) {
         d_inner = take_workspace<int>(cursor, inner_bytes / sizeof(int));
+      }
+      if (stage_bytes > 0) {
+        d_stage = take_workspace<double>(cursor, stage_bytes / sizeof(double));
       }
     }
   }
@@ -1718,16 +1928,20 @@ int compute_fa_exchange_on_device(int device, int nmo, int ndoc, int nact,
   constexpr int threads = 256;
   const double alpha = 1.0;
   const double beta = 1.0;
-  for (long long q = q_begin; q < q_end; q += q_chunk) {
-    const int bq = static_cast<int>(std::min<long long>(q_chunk, q_end - q));
+  for (long long q = q_begin; q < q_end;) {
+    int bq = static_cast<int>(std::min<long long>(q_chunk, q_end - q));
+    bq = clamp_tile_to_residency(resident, q, bq);
+    const bool tile_resident =
+        resident != nullptr && resident->tile_resident(q, bq);
     const int ldx = bq * nact;
     const std::size_t int2_bq_bytes =
         static_cast<std::size_t>(bq) * ngem * sizeof(double);
+    double *const stage_block = resident == nullptr ? d_int2 : d_stage;
     const double *device_block =
-        resident == nullptr ? d_int2 : d_int2 + (q - q_begin) * ngem;
-    if (resident == nullptr) {
-      if (cudaMemcpy(d_int2, int2 + q * ngem, int2_bq_bytes,
-                     cudaMemcpyHostToDevice) != cudaSuccess) {
+        tile_resident ? d_int2 + (q - resident->q_begin) * ngem : stage_block;
+    if (!tile_resident) {
+      if (upload_stream_tile(device, stage_block, int2 + q * ngem,
+                             int2_bq_bytes) != cudaSuccess) {
         cleanup();
         return 45;
       }
@@ -1757,6 +1971,7 @@ int compute_fa_exchange_on_device(int device, int nmo, int ndoc, int nact,
       cleanup();
       return 48;
     }
+    q += bq;
   }
   if (cudaMemcpy(host_c.data(), d_c, c_bytes, cudaMemcpyDeviceToHost) !=
       cudaSuccess) {
@@ -1823,7 +2038,8 @@ int compute_q_on_device(int device, int nmo, int ndoc, int nact, long long nQ,
   const int ngem_act = static_cast<int>(ngem_act_ll);
   const int q_chunk = choose_q_q_chunk(
       device, nmo, nact, q_end - q_begin, ngem, requested_q_chunk,
-      resident != nullptr, resident == nullptr ? 0 : resident->workspace_bytes);
+      slice_is_fully_resident(resident, q_end),
+      resident == nullptr ? 0 : resident->workspace_bytes);
   const std::size_t int2_bytes =
       static_cast<std::size_t>(q_chunk) * ngem * sizeof(double);
   const std::size_t active_bytes =
@@ -1838,8 +2054,11 @@ int compute_q_on_device(int device, int nmo, int ndoc, int nact, long long nQ,
       static_cast<std::size_t>(nact) * nmo * sizeof(double);
   const std::size_t act_index_bytes =
       act_df == nullptr ? 0 : static_cast<std::size_t>(nact) * sizeof(int);
+  const std::size_t stage_bytes =
+      streaming_stage_bytes(resident, q_end, q_chunk, ngem);
 
   double *d_int2 = nullptr;
+  double *d_stage = nullptr;
   double *d_active = nullptr;
   double *d_d2 = nullptr;
   double *d_qint = nullptr;
@@ -1871,7 +2090,7 @@ int compute_q_on_device(int device, int nmo, int ndoc, int nact, long long nQ,
     d_int2 = resident->d_int2;
     pooled_workspace = ensure_session_workspace(
         resident, 2 * active_bytes + d2_bytes + b_bytes + result_bytes +
-                      q_bytes + act_index_bytes);
+                      q_bytes + act_index_bytes + stage_bytes);
     if (pooled_workspace) {
       unsigned char *cursor = resident->workspace;
       d_active = take_workspace<double>(cursor, active_bytes / sizeof(double));
@@ -1882,6 +2101,9 @@ int compute_q_on_device(int device, int nmo, int ndoc, int nact, long long nQ,
       d_q = take_workspace<double>(cursor, q_bytes / sizeof(double));
       if (act_index_bytes > 0) {
         d_act = take_workspace<int>(cursor, act_index_bytes / sizeof(int));
+      }
+      if (stage_bytes > 0) {
+        d_stage = take_workspace<double>(cursor, stage_bytes / sizeof(double));
       }
     }
   }
@@ -1924,15 +2146,19 @@ int compute_q_on_device(int device, int nmo, int ndoc, int nact, long long nQ,
   constexpr int threads = 256;
   const double alpha = 1.0;
   const double beta0 = 0.0;
-  for (long long q = q_begin; q < q_end; q += q_chunk) {
-    const int bq = static_cast<int>(std::min<long long>(q_chunk, q_end - q));
+  for (long long q = q_begin; q < q_end;) {
+    int bq = static_cast<int>(std::min<long long>(q_chunk, q_end - q));
+    bq = clamp_tile_to_residency(resident, q, bq);
+    const bool tile_resident =
+        resident != nullptr && resident->tile_resident(q, bq);
     const std::size_t int2_bq_bytes =
         static_cast<std::size_t>(bq) * ngem * sizeof(double);
+    double *const stage_block = resident == nullptr ? d_int2 : d_stage;
     const double *device_block =
-        resident == nullptr ? d_int2 : d_int2 + (q - q_begin) * ngem;
-    if (resident == nullptr) {
-      if (cudaMemcpy(d_int2, int2 + q * ngem, int2_bq_bytes,
-                     cudaMemcpyHostToDevice) != cudaSuccess) {
+        tile_resident ? d_int2 + (q - resident->q_begin) * ngem : stage_block;
+    if (!tile_resident) {
+      if (upload_stream_tile(device, stage_block, int2 + q * ngem,
+                             int2_bq_bytes) != cudaSuccess) {
         cleanup();
         return 85;
       }
@@ -1975,6 +2201,7 @@ int compute_q_on_device(int device, int nmo, int ndoc, int nact, long long nQ,
         return 90;
       }
     }
+    q += bq;
   }
   if (cudaMemcpy(host_q.data(), d_q, q_bytes, cudaMemcpyDeviceToHost) !=
       cudaSuccess) {
@@ -2051,7 +2278,8 @@ int compute_coulomb_on_device(int device, long long q_begin, long long q_end,
       session_device_slice(device, int2, ngem, q_begin, q_end);
 
   const int q_chunk = choose_coulomb_q_chunk(
-      device, q_end - q_begin, ngem, requested_q_chunk, resident != nullptr,
+      device, q_end - q_begin, ngem, requested_q_chunk,
+      slice_is_fully_resident(resident, q_end),
       resident == nullptr ? 0 : resident->workspace_bytes);
   const std::size_t int2_bytes =
       static_cast<std::size_t>(q_chunk) * ngem * sizeof(double);
@@ -2065,7 +2293,11 @@ int compute_coulomb_on_device(int device, long long q_begin, long long q_end,
           ? static_cast<std::size_t>(nact) * (nact + 1) / 2 * sizeof(double)
           : 0;
 
+  const std::size_t stage_bytes =
+      streaming_stage_bytes(resident, q_end, q_chunk, ngem);
+
   double *d_int2 = nullptr;
+  double *d_stage = nullptr;
   double *d_qvec = nullptr;
   double *d_pairs = nullptr;
   double *d_den1 = nullptr;
@@ -2084,13 +2316,16 @@ int compute_coulomb_on_device(int device, long long q_begin, long long q_end,
   if (resident != nullptr) {
     d_int2 = resident->d_int2;
     pooled_workspace = ensure_session_workspace(
-        resident, qvec_bytes + pair_bytes + den1_bytes);
+        resident, qvec_bytes + pair_bytes + den1_bytes + stage_bytes);
     if (pooled_workspace) {
       unsigned char *cursor = resident->workspace;
       d_qvec = take_workspace<double>(cursor, qvec_bytes / sizeof(double));
       d_pairs = take_workspace<double>(cursor, pair_bytes / sizeof(double));
       if (den1_bytes > 0) {
         d_den1 = take_workspace<double>(cursor, den1_bytes / sizeof(double));
+      }
+      if (stage_bytes > 0) {
+        d_stage = take_workspace<double>(cursor, stage_bytes / sizeof(double));
       }
     }
   }
@@ -2118,24 +2353,31 @@ int compute_coulomb_on_device(int device, long long q_begin, long long q_end,
 
   const double alpha = 1.0;
   const double beta = 1.0;
-  for (long long q = q_begin; q < q_end; q += q_chunk) {
-    const int bq = static_cast<int>(std::min<long long>(q_chunk, q_end - q));
+  for (long long q = q_begin; q < q_end;) {
+    int bq = static_cast<int>(std::min<long long>(q_chunk, q_end - q));
+    bq = clamp_tile_to_residency(resident, q, bq);
+    const bool tile_resident =
+        resident != nullptr && resident->tile_resident(q, bq);
     const std::size_t int2_bq_bytes =
         static_cast<std::size_t>(bq) * ngem * sizeof(double);
     const std::size_t qvec_bq_bytes =
         static_cast<std::size_t>(bq) * sizeof(double);
+    double *const stage_block = resident == nullptr ? d_int2 : d_stage;
     const double *device_block =
-        resident == nullptr ? d_int2 : d_int2 + (q - q_begin) * ngem;
-    if (resident == nullptr) {
-      if (cudaMemcpy(d_int2, int2 + q * ngem, int2_bq_bytes,
-                     cudaMemcpyHostToDevice) != cudaSuccess ||
+        tile_resident ? d_int2 + (q - resident->q_begin) * ngem : stage_block;
+    // Resident rows may be newer on the device than on the host, so their
+    // Coulomb vector is rebuilt from device data.  Streamed rows are current on
+    // the host, so the precomputed host vector is uploaded with the tile.
+    if (!tile_resident) {
+      if (upload_stream_tile(device, stage_block, int2 + q * ngem,
+                             int2_bq_bytes) != cudaSuccess ||
           cudaMemcpy(d_qvec, qvec + q, qvec_bq_bytes, cudaMemcpyHostToDevice) !=
               cudaSuccess) {
         cleanup();
         return 114;
       }
     }
-    if (resident != nullptr) {
+    if (tile_resident) {
       constexpr int threads = 256;
       if (inactive_coulomb) {
         build_fi_coulomb_vector_kernel<<<cuda_blocks(bq, threads), threads>>>(
@@ -2155,6 +2397,7 @@ int compute_coulomb_on_device(int device, long long q_begin, long long q_end,
       cleanup();
       return 115;
     }
+    q += bq;
   }
   if (cudaMemcpy(host_pairs.data(), d_pairs, pair_bytes,
                  cudaMemcpyDeviceToHost) != cudaSuccess) {
@@ -2314,6 +2557,411 @@ int run_exchange_workers(int nmo, long long nQ, int max_devices, Worker worker,
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Fused C1 gradient.
+//
+// The five C1 gradient operators -- Fi Coulomb, Fa Coulomb, Fi exchange, Fa
+// exchange and the Q contraction -- all read the same DF tensor.  Run
+// separately they walk it five times, so a partially resident tensor pays five
+// PCIe passes per gradient evaluation on top of the transform's two.  This
+// routine walks it once: every Q tile is made available on the device a single
+// time and immediately consumed by all five contractions, cutting a gradient
+// from five passes to one.
+//
+// It also removes the host-side Coulomb vector entirely.  Because the tile is
+// always on the device here (resident or staged), both Coulomb vectors are
+// built on the GPU, so the host never has to sweep the packed tensor.
+// ---------------------------------------------------------------------------
+int choose_fused_gradient_q_chunk(int device, int nmo, int ndoc, int nact,
+                                  long long q_count, long long ngem,
+                                  int ngem_act, int requested_block_q,
+                                  bool int2_resident,
+                                  std::size_t reclaimable_bytes) {
+  if (q_count <= 0) {
+    return 1;
+  }
+  if (requested_block_q > 0) {
+    return static_cast<int>(std::max<long long>(
+        1, std::min<long long>(requested_block_q, q_count)));
+  }
+  std::size_t free_bytes = 0;
+  std::size_t total_bytes = 0;
+  if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess ||
+      free_bytes == 0) {
+    return static_cast<int>(std::min<long long>(32, q_count));
+  }
+
+  constexpr int max_auto_q_chunk = 4096;
+  const double n = static_cast<double>(nmo);
+  const double free_d = static_cast<double>(free_bytes) + reclaimable_bytes;
+  const double reserve = std::max(512.0 * 1024.0 * 1024.0, 0.10 * free_d);
+  const double budget = std::max(0.0, free_d - reserve) * 0.75;
+  // Fixed: two nmo*nmo exchange accumulators, two packed Coulomb accumulators,
+  // the scaled 2-RDM, the Q result and output, and the packed active 1-RDM.
+  const double fixed_bytes =
+      (2.0 * n * n + 2.0 * static_cast<double>(ngem) +
+       static_cast<double>(ngem_act) * static_cast<double>(ngem_act) +
+       n * static_cast<double>(ngem_act) + static_cast<double>(nact) * n +
+       static_cast<double>(nact) * (nact + 1) / 2) *
+      sizeof(double);
+  // Per Q row: the doc and active pair-column matrices, the active-density
+  // product, the Q active/intermediate pair blocks, one general-active column,
+  // the two Coulomb vector entries, and the streamed tile when not resident.
+  const double per_q_bytes =
+      (static_cast<double>(ndoc) * n + 2.0 * static_cast<double>(nact) * n +
+       2.0 * static_cast<double>(ngem_act) + n + 2.0 +
+       (int2_resident ? 0.0 : static_cast<double>(ngem))) *
+      sizeof(double);
+  return bounded_auto_chunk((budget - fixed_bytes) / per_q_bytes,
+                            max_auto_q_chunk, q_count);
+}
+
+int compute_gradient_all_on_device(
+    int device, int nmo, int ndoc, int nact, long long q_begin, long long q_end,
+    long long ngem, const double *int2, const double *den1_act,
+    const std::vector<double> &scaled_d2, int requested_q_chunk,
+    std::vector<double> &host_c_fi, std::vector<double> &host_c_fa,
+    std::vector<double> &host_pairs_fi, std::vector<double> &host_pairs_fa,
+    std::vector<double> &host_q) {
+  if (q_begin >= q_end) {
+    std::fill(host_c_fi.begin(), host_c_fi.end(), 0.0);
+    std::fill(host_c_fa.begin(), host_c_fa.end(), 0.0);
+    std::fill(host_pairs_fi.begin(), host_pairs_fi.end(), 0.0);
+    std::fill(host_pairs_fa.begin(), host_pairs_fa.end(), 0.0);
+    std::fill(host_q.begin(), host_q.end(), 0.0);
+    return 0;
+  }
+  if (cudaSetDevice(device) != cudaSuccess) {
+    return 300;
+  }
+  cublasHandle_t handle = nullptr;
+  if (cublasCreate(&handle) != CUBLAS_STATUS_SUCCESS) {
+    return 301;
+  }
+
+  FocasSessionDevice *resident =
+      session_device_slice(device, int2, ngem, q_begin, q_end);
+
+  const long long ngem_act_ll = static_cast<long long>(nact) * (nact + 1) / 2;
+  if (ngem_act_ll > std::numeric_limits<int>::max()) {
+    cublasDestroy(handle);
+    return 302;
+  }
+  const int ngem_act = static_cast<int>(ngem_act_ll);
+  const int q_chunk = choose_fused_gradient_q_chunk(
+      device, nmo, ndoc, nact, q_end - q_begin, ngem, ngem_act,
+      requested_q_chunk, slice_is_fully_resident(resident, q_end),
+      resident == nullptr ? 0 : resident->workspace_bytes);
+
+  const long long ldx_doc_ll = static_cast<long long>(q_chunk) * ndoc;
+  const long long ldx_act_ll = static_cast<long long>(q_chunk) * nact;
+  if (ldx_doc_ll > std::numeric_limits<int>::max() ||
+      ldx_act_ll > std::numeric_limits<int>::max()) {
+    cublasDestroy(handle);
+    return 303;
+  }
+
+  const std::size_t x_doc_bytes =
+      static_cast<std::size_t>(ldx_doc_ll) * nmo * sizeof(double);
+  const std::size_t x_act_bytes =
+      static_cast<std::size_t>(ldx_act_ll) * nmo * sizeof(double);
+  const std::size_t c_bytes =
+      static_cast<std::size_t>(nmo) * nmo * sizeof(double);
+  const std::size_t pair_bytes =
+      static_cast<std::size_t>(ngem) * sizeof(double);
+  const std::size_t qvec_bytes =
+      static_cast<std::size_t>(q_chunk) * sizeof(double);
+  const std::size_t den1_bytes =
+      static_cast<std::size_t>(ngem_act) * sizeof(double);
+  const std::size_t active_bytes =
+      static_cast<std::size_t>(q_chunk) * ngem_act * sizeof(double);
+  const std::size_t b_bytes =
+      static_cast<std::size_t>(q_chunk) * nmo * sizeof(double);
+  const std::size_t d2_bytes =
+      static_cast<std::size_t>(ngem_act) * ngem_act * sizeof(double);
+  const std::size_t result_bytes =
+      static_cast<std::size_t>(nmo) * ngem_act * sizeof(double);
+  const std::size_t q_bytes =
+      static_cast<std::size_t>(nact) * nmo * sizeof(double);
+  const std::size_t int2_bytes =
+      static_cast<std::size_t>(q_chunk) * ngem * sizeof(double);
+  const std::size_t stage_bytes =
+      streaming_stage_bytes(resident, q_end, q_chunk, ngem);
+  const std::size_t pooled_bytes =
+      x_doc_bytes + 2 * x_act_bytes + 2 * c_bytes + 2 * pair_bytes +
+      2 * qvec_bytes + den1_bytes + 2 * active_bytes + b_bytes + d2_bytes +
+      result_bytes + q_bytes + stage_bytes;
+
+  double *d_int2 = nullptr;
+  double *d_stage = nullptr;
+  double *d_x_doc = nullptr;
+  double *d_x_act = nullptr;
+  double *d_y_act = nullptr;
+  double *d_c_fi = nullptr;
+  double *d_c_fa = nullptr;
+  double *d_pairs_fi = nullptr;
+  double *d_pairs_fa = nullptr;
+  double *d_qvec_fi = nullptr;
+  double *d_qvec_fa = nullptr;
+  double *d_den1 = nullptr;
+  double *d_active = nullptr;
+  double *d_qint = nullptr;
+  double *d_b = nullptr;
+  double *d_d2 = nullptr;
+  double *d_result = nullptr;
+  double *d_q = nullptr;
+  bool pooled_workspace = false;
+
+  auto cleanup = [&]() {
+    if (!pooled_workspace) {
+      cudaFree(d_q);
+      cudaFree(d_result);
+      cudaFree(d_d2);
+      cudaFree(d_b);
+      cudaFree(d_qint);
+      cudaFree(d_active);
+      cudaFree(d_den1);
+      cudaFree(d_qvec_fa);
+      cudaFree(d_qvec_fi);
+      cudaFree(d_pairs_fa);
+      cudaFree(d_pairs_fi);
+      cudaFree(d_c_fa);
+      cudaFree(d_c_fi);
+      cudaFree(d_y_act);
+      cudaFree(d_x_act);
+      cudaFree(d_x_doc);
+    }
+    if (d_int2 != nullptr && resident == nullptr) {
+      cudaFree(d_int2);
+    }
+    cublasDestroy(handle);
+  };
+
+  if (resident != nullptr) {
+    d_int2 = resident->d_int2;
+    pooled_workspace = ensure_session_workspace(resident, pooled_bytes);
+    if (pooled_workspace) {
+      unsigned char *cursor = resident->workspace;
+      d_x_doc = take_workspace<double>(cursor, x_doc_bytes / sizeof(double));
+      d_x_act = take_workspace<double>(cursor, x_act_bytes / sizeof(double));
+      d_y_act = take_workspace<double>(cursor, x_act_bytes / sizeof(double));
+      d_c_fi = take_workspace<double>(cursor, c_bytes / sizeof(double));
+      d_c_fa = take_workspace<double>(cursor, c_bytes / sizeof(double));
+      d_pairs_fi = take_workspace<double>(cursor, pair_bytes / sizeof(double));
+      d_pairs_fa = take_workspace<double>(cursor, pair_bytes / sizeof(double));
+      d_qvec_fi = take_workspace<double>(cursor, qvec_bytes / sizeof(double));
+      d_qvec_fa = take_workspace<double>(cursor, qvec_bytes / sizeof(double));
+      d_den1 = take_workspace<double>(cursor, den1_bytes / sizeof(double));
+      d_active = take_workspace<double>(cursor, active_bytes / sizeof(double));
+      d_qint = take_workspace<double>(cursor, active_bytes / sizeof(double));
+      d_b = take_workspace<double>(cursor, b_bytes / sizeof(double));
+      d_d2 = take_workspace<double>(cursor, d2_bytes / sizeof(double));
+      d_result = take_workspace<double>(cursor, result_bytes / sizeof(double));
+      d_q = take_workspace<double>(cursor, q_bytes / sizeof(double));
+      if (stage_bytes > 0) {
+        d_stage = take_workspace<double>(cursor, stage_bytes / sizeof(double));
+      }
+    }
+  }
+  if ((resident != nullptr && !pooled_workspace) ||
+      (resident == nullptr &&
+       (cudaMalloc(&d_int2, int2_bytes) != cudaSuccess ||
+        cudaMalloc(&d_x_doc, x_doc_bytes) != cudaSuccess ||
+        cudaMalloc(&d_x_act, x_act_bytes) != cudaSuccess ||
+        cudaMalloc(&d_y_act, x_act_bytes) != cudaSuccess ||
+        cudaMalloc(&d_c_fi, c_bytes) != cudaSuccess ||
+        cudaMalloc(&d_c_fa, c_bytes) != cudaSuccess ||
+        cudaMalloc(&d_pairs_fi, pair_bytes) != cudaSuccess ||
+        cudaMalloc(&d_pairs_fa, pair_bytes) != cudaSuccess ||
+        cudaMalloc(&d_qvec_fi, qvec_bytes) != cudaSuccess ||
+        cudaMalloc(&d_qvec_fa, qvec_bytes) != cudaSuccess ||
+        cudaMalloc(&d_den1, den1_bytes) != cudaSuccess ||
+        cudaMalloc(&d_active, active_bytes) != cudaSuccess ||
+        cudaMalloc(&d_qint, active_bytes) != cudaSuccess ||
+        cudaMalloc(&d_b, b_bytes) != cudaSuccess ||
+        cudaMalloc(&d_d2, d2_bytes) != cudaSuccess ||
+        cudaMalloc(&d_result, result_bytes) != cudaSuccess ||
+        cudaMalloc(&d_q, q_bytes) != cudaSuccess))) {
+    cleanup();
+    return 304;
+  }
+
+  if (cudaMemset(d_c_fi, 0, c_bytes) != cudaSuccess ||
+      cudaMemset(d_c_fa, 0, c_bytes) != cudaSuccess ||
+      cudaMemset(d_pairs_fi, 0, pair_bytes) != cudaSuccess ||
+      cudaMemset(d_pairs_fa, 0, pair_bytes) != cudaSuccess ||
+      cudaMemset(d_q, 0, q_bytes) != cudaSuccess) {
+    cleanup();
+    return 305;
+  }
+  if (cudaMemcpy(d_den1, den1_act, den1_bytes, cudaMemcpyHostToDevice) !=
+          cudaSuccess ||
+      cudaMemcpy(d_d2, scaled_d2.data(), d2_bytes, cudaMemcpyHostToDevice) !=
+          cudaSuccess) {
+    cleanup();
+    return 306;
+  }
+
+  constexpr int threads = 256;
+  const double one = 1.0;
+  const double zero = 0.0;
+
+  for (long long q = q_begin; q < q_end;) {
+    int bq = static_cast<int>(std::min<long long>(q_chunk, q_end - q));
+    bq = clamp_tile_to_residency(resident, q, bq);
+    const bool tile_resident =
+        resident != nullptr && resident->tile_resident(q, bq);
+    const std::size_t int2_bq_bytes =
+        static_cast<std::size_t>(bq) * ngem * sizeof(double);
+    double *const stage_block = resident == nullptr ? d_int2 : d_stage;
+    const double *device_block =
+        tile_resident ? d_int2 + (q - resident->q_begin) * ngem : stage_block;
+
+    // The single upload of this tile; everything below reuses it.
+    if (!tile_resident) {
+      if (upload_stream_tile(device, stage_block, int2 + q * ngem,
+                             int2_bq_bytes) != cudaSuccess) {
+        cleanup();
+        return 307;
+      }
+    }
+
+    // --- Fi exchange -------------------------------------------------------
+    if (ndoc > 0) {
+      const int ldx = bq * ndoc;
+      const long long total = static_cast<long long>(ldx) * nmo;
+      build_pair_column_matrix_kernel<<<cuda_blocks(total, threads), threads>>>(
+          device_block, d_x_doc, nmo, 0, ndoc, 0, bq, ngem, ldx);
+      if (cudaGetLastError() != cudaSuccess) {
+        cleanup();
+        return 308;
+      }
+      if (cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, nmo, nmo, ldx, &one,
+                      d_x_doc, ldx, d_x_doc, ldx, &one, d_c_fi,
+                      nmo) != CUBLAS_STATUS_SUCCESS) {
+        cleanup();
+        return 309;
+      }
+    }
+
+    // --- Fa exchange -------------------------------------------------------
+    if (nact > 0) {
+      const int ldx = bq * nact;
+      const long long total = static_cast<long long>(ldx) * nmo;
+      build_pair_column_matrix_kernel<<<cuda_blocks(total, threads), threads>>>(
+          device_block, d_x_act, nmo, ndoc, nact, 0, bq, ngem, ldx);
+      if (cudaGetLastError() != cudaSuccess) {
+        cleanup();
+        return 310;
+      }
+      apply_active_density_kernel<<<cuda_blocks(total, threads), threads>>>(
+          d_x_act, d_den1, d_y_act, nmo, nact, bq, ldx);
+      if (cudaGetLastError() != cudaSuccess) {
+        cleanup();
+        return 311;
+      }
+      if (cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, nmo, nmo, ldx, &one,
+                      d_x_act, ldx, d_y_act, ldx, &one, d_c_fa,
+                      nmo) != CUBLAS_STATUS_SUCCESS) {
+        cleanup();
+        return 312;
+      }
+    }
+
+    // --- Fi and Fa Coulomb -------------------------------------------------
+    if (ndoc > 0) {
+      build_fi_coulomb_vector_kernel<<<cuda_blocks(bq, threads), threads>>>(
+          device_block, d_qvec_fi, ndoc, bq, ngem);
+      if (cudaGetLastError() != cudaSuccess) {
+        cleanup();
+        return 313;
+      }
+      if (cublasDgemv(handle, CUBLAS_OP_N, static_cast<int>(ngem), bq, &one,
+                      device_block, static_cast<int>(ngem), d_qvec_fi, 1, &one,
+                      d_pairs_fi, 1) != CUBLAS_STATUS_SUCCESS) {
+        cleanup();
+        return 314;
+      }
+    }
+    if (nact > 0) {
+      build_fa_coulomb_vector_kernel<<<cuda_blocks(bq, threads), threads>>>(
+          device_block, d_den1, d_qvec_fa, ndoc, nact, bq, ngem);
+      if (cudaGetLastError() != cudaSuccess) {
+        cleanup();
+        return 315;
+      }
+      if (cublasDgemv(handle, CUBLAS_OP_N, static_cast<int>(ngem), bq, &one,
+                      device_block, static_cast<int>(ngem), d_qvec_fa, 1, &one,
+                      d_pairs_fa, 1) != CUBLAS_STATUS_SUCCESS) {
+        cleanup();
+        return 316;
+      }
+    }
+
+    // --- Q contraction -----------------------------------------------------
+    if (nact > 0) {
+      const long long active_total = static_cast<long long>(bq) * ngem_act;
+      build_active_pair_matrix_kernel<<<cuda_blocks(active_total, threads),
+                                        threads>>>(device_block, d_active, ndoc,
+                                                   nact, bq, ngem, bq, nullptr);
+      if (cudaGetLastError() != cudaSuccess) {
+        cleanup();
+        return 317;
+      }
+      if (cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, bq, ngem_act, ngem_act,
+                      &one, d_active, bq, d_d2, ngem_act, &zero, d_qint,
+                      bq) != CUBLAS_STATUS_SUCCESS) {
+        cleanup();
+        return 318;
+      }
+      const long long b_total = static_cast<long long>(bq) * nmo;
+      for (int u = 0; u < nact; ++u) {
+        build_general_active_matrix_kernel<<<cuda_blocks(b_total, threads),
+                                             threads>>>(
+            device_block, d_b, nmo, ndoc, u, bq, ngem, bq, nullptr);
+        if (cudaGetLastError() != cudaSuccess) {
+          cleanup();
+          return 319;
+        }
+        if (cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, nmo, ngem_act, bq,
+                        &one, d_b, bq, d_qint, bq, &zero, d_result,
+                        nmo) != CUBLAS_STATUS_SUCCESS) {
+          cleanup();
+          return 320;
+        }
+        scatter_q_result_kernel<<<
+            cuda_blocks(static_cast<long long>(nact) * nmo, threads),
+            threads>>>(d_result, d_q, nmo, nact, u);
+        if (cudaGetLastError() != cudaSuccess) {
+          cleanup();
+          return 321;
+        }
+      }
+    }
+    q += bq;
+  }
+
+  if (cudaMemcpy(host_c_fi.data(), d_c_fi, c_bytes, cudaMemcpyDeviceToHost) !=
+          cudaSuccess ||
+      cudaMemcpy(host_c_fa.data(), d_c_fa, c_bytes, cudaMemcpyDeviceToHost) !=
+          cudaSuccess ||
+      cudaMemcpy(host_pairs_fi.data(), d_pairs_fi, pair_bytes,
+                 cudaMemcpyDeviceToHost) != cudaSuccess ||
+      cudaMemcpy(host_pairs_fa.data(), d_pairs_fa, pair_bytes,
+                 cudaMemcpyDeviceToHost) != cudaSuccess ||
+      cudaMemcpy(host_q.data(), d_q, q_bytes, cudaMemcpyDeviceToHost) !=
+          cudaSuccess) {
+    cleanup();
+    return 322;
+  }
+  if (cudaDeviceSynchronize() != cudaSuccess) {
+    cleanup();
+    return 323;
+  }
+  cleanup();
+  return 0;
+}
+
 } // namespace
 
 extern "C" int hilbert_focas_df_cuda_session_begin(int nmo, long long nQ,
@@ -2352,6 +3000,7 @@ extern "C" int hilbert_focas_df_cuda_session_begin(int nmo, long long nQ,
     entry.device = dev;
     entry.q_begin = q_cursor;
     entry.q_end = std::min(nQ, q_cursor + share);
+    entry.q_res_end = entry.q_begin; // nothing resident until admitted below
     q_cursor = entry.q_end;
 
     if (cudaSetDevice(dev) != cudaSuccess)
@@ -2366,41 +3015,70 @@ extern "C" int hilbert_focas_df_cuda_session_begin(int nmo, long long nQ,
         static_cast<unsigned long long>(ngem) * sizeof(double);
     if (q_count > std::numeric_limits<std::size_t>::max() / row_bytes)
       continue;
-    entry.int2_bytes = static_cast<std::size_t>(q_count * row_bytes);
+    const std::size_t slice_bytes =
+        static_cast<std::size_t>(q_count * row_bytes);
 
-    // Respect allocations already owned by GPU_ADMM and leave a substantial
-    // working reserve for the transform/gradient kernels.  This admits the
-    // largest expected tensors on otherwise-free 40-GiB devices but declines
-    // residency automatically when another solver has consumed too much memory.
-    const std::size_t four_gib = static_cast<std::size_t>(4) << 30;
-    const std::size_t reserve =
-        std::max(four_gib, static_cast<std::size_t>(0.25 * free_bytes));
-    const bool fits =
-        free_bytes > reserve && entry.int2_bytes <= free_bytes - reserve;
-    int status = 0;
-    if (fits) {
-      status =
-          cudaMalloc(&entry.d_int2, entry.int2_bytes) == cudaSuccess ? 0 : 1;
-      if (status == 0) {
-        if (entry.int2_bytes >= kPinnedResidentUploadThreshold) {
-          PinnedStagingLease staging_lease(dev, entry.int2_bytes);
-          PinnedTransferStaging &staging = staging_lease.staging();
-          status = staging.copy_h2d(entry.d_int2, int2 + entry.q_begin * ngem,
-                                    entry.int2_bytes) == cudaSuccess
-                       ? 0
-                       : 2;
-        } else {
-          status = cudaMemcpy(entry.d_int2, int2 + entry.q_begin * ngem,
-                              entry.int2_bytes,
-                              cudaMemcpyHostToDevice) == cudaSuccess
-                       ? 0
-                       : 2;
-        }
+    // Hold back a working reserve, then keep as much of the slice on the device
+    // as the remainder allows.  Residency is a prefix, not all-or-nothing: the
+    // rows that do not fit are streamed per tile instead of forcing the whole
+    // slice back onto the host.  That removes the cliff where one extra Q row
+    // turned a fully resident tensor into a fully streamed one.
+    const std::size_t reserve = focas_working_reserve_bytes(nmo, free_bytes);
+    const std::size_t budget = free_bytes > reserve ? free_bytes - reserve : 0;
+    long long rows = static_cast<long long>(budget / row_bytes);
+    rows = std::min<long long>(rows, static_cast<long long>(q_count));
+
+    // Back off on allocation failure: free memory can be fragmented enough that
+    // a block the size reported by cudaMemGetInfo is not actually obtainable.
+    while (rows > 0) {
+      const std::size_t bytes =
+          static_cast<std::size_t>(rows) * static_cast<std::size_t>(row_bytes);
+      if (cudaMalloc(&entry.d_int2, bytes) == cudaSuccess) {
+        entry.int2_bytes = bytes;
+        break;
       }
-      if (status != 0 && entry.d_int2 != nullptr) {
+      entry.d_int2 = nullptr;
+      cudaGetLastError(); // clear the sticky OOM before retrying
+      rows /= 2;
+    }
+
+    if (rows > 0) {
+      const double *host_slice = int2 + entry.q_begin * ngem;
+      cudaError_t upload = cudaSuccess;
+      if (entry.int2_bytes >= kPinnedResidentUploadThreshold) {
+        PinnedStagingLease staging_lease(dev, entry.int2_bytes);
+        upload = staging_lease.staging().copy_h2d(entry.d_int2, host_slice,
+                                                  entry.int2_bytes);
+      } else {
+        upload = cudaMemcpy(entry.d_int2, host_slice, entry.int2_bytes,
+                            cudaMemcpyHostToDevice);
+      }
+      if (upload == cudaSuccess) {
+        entry.q_res_end = entry.q_begin + rows;
+      } else {
         cudaFree(entry.d_int2);
         entry.d_int2 = nullptr;
+        entry.int2_bytes = 0;
+        rows = 0;
       }
+    }
+
+    const double resident_fraction =
+        q_count == 0 ? 0.0
+                     : static_cast<double>(rows) / static_cast<double>(q_count);
+    if (rows == 0) {
+      focas_notice("device %d: DF tensor slice %.2f GiB does not fit "
+                   "(free %.2f GiB, reserve %.2f GiB); every Q tile will be "
+                   "streamed over PCIe",
+                   dev, to_gib(slice_bytes), to_gib(free_bytes),
+                   to_gib(reserve));
+    } else if (rows < static_cast<long long>(q_count)) {
+      focas_notice("device %d: DF tensor slice %.2f GiB partially resident "
+                   "(%.2f GiB, %.0f%% of Q rows; free %.2f GiB, reserve "
+                   "%.2f GiB); the remainder is streamed per tile",
+                   dev, to_gib(slice_bytes), to_gib(entry.int2_bytes),
+                   100.0 * resident_fraction, to_gib(free_bytes),
+                   to_gib(reserve));
     }
   }
   return 0;
@@ -2892,6 +3570,111 @@ extern "C" int hilbert_focas_df_sym_cuda_q(int nmo, int ndoc, int nact,
     for (std::size_t i = 0; i < q_size; ++i) {
       q_out[i] += partial[i];
     }
+  }
+  return 0;
+}
+
+// Fused C1 gradient: computes the inactive and active Fock matrices and the
+// auxiliary Q matrix in a single sweep of the DF tensor, replacing the five
+// separate operator calls.  Semantics are identical to running
+// hilbert_focas_df_c1_cuda_{fi_coulomb,fi_exchange,fa_coulomb,fa_exchange,q}
+// in that order -- the Coulomb scatters assign and the exchange scatters
+// accumulate, so the order below is load-bearing.
+extern "C" int hilbert_focas_df_c1_cuda_gradient_all(
+    int nmo, int ndoc, int nact, long long nQ, const double *int1,
+    const double *int2, const double *den1, const double *den2,
+    double *fock_i_occ, double *fock_i_ext, double *fock_a_occ,
+    double *fock_a_ext, double *q_out, int q_chunk, int max_devices) {
+  if (nmo <= 0 || ndoc < 0 || nact < 0 || nQ <= 0 || int1 == nullptr ||
+      int2 == nullptr || den1 == nullptr || den2 == nullptr ||
+      fock_i_occ == nullptr || fock_i_ext == nullptr ||
+      fock_a_occ == nullptr || fock_a_ext == nullptr || q_out == nullptr ||
+      ndoc + nact > nmo) {
+    return 340;
+  }
+  const int devices = device_count_from_request(max_devices);
+  if (devices <= 0) {
+    return 341;
+  }
+
+  const long long ngem = static_cast<long long>(nmo) * (nmo + 1) / 2;
+  const long long ngem_act = static_cast<long long>(nact) * (nact + 1) / 2;
+  const std::size_t c_size = static_cast<std::size_t>(nmo) * nmo;
+  const std::size_t pair_size = static_cast<std::size_t>(ngem);
+  const std::size_t q_size = static_cast<std::size_t>(nact) * nmo;
+
+  std::vector<double> scaled_d2(
+      static_cast<std::size_t>(ngem_act) * ngem_act, 0.0);
+  if (nact > 0) {
+    build_scaled_c1_d2(nact, den2, scaled_d2);
+  }
+
+  std::vector<std::thread> workers;
+  std::vector<int> statuses(devices, 0);
+  std::vector<std::vector<double>> part_c_fi(devices,
+                                             std::vector<double>(c_size, 0.0));
+  std::vector<std::vector<double>> part_c_fa(devices,
+                                             std::vector<double>(c_size, 0.0));
+  std::vector<std::vector<double>> part_p_fi(
+      devices, std::vector<double>(pair_size, 0.0));
+  std::vector<std::vector<double>> part_p_fa(
+      devices, std::vector<double>(pair_size, 0.0));
+  std::vector<std::vector<double>> part_q(devices,
+                                          std::vector<double>(q_size, 0.0));
+
+  long long q_cursor = 0;
+  for (int dev = 0; dev < devices; ++dev) {
+    const long long remaining = nQ - q_cursor;
+    const int remaining_devices = devices - dev;
+    const long long share =
+        (remaining + remaining_devices - 1) / remaining_devices;
+    const long long q_begin = q_cursor;
+    const long long q_end = std::min(nQ, q_begin + share);
+    q_cursor = q_end;
+    workers.emplace_back([&, dev, q_begin, q_end]() {
+      statuses[dev] = compute_gradient_all_on_device(
+          dev, nmo, ndoc, nact, q_begin, q_end, ngem, int2, den1, scaled_d2,
+          q_chunk, part_c_fi[dev], part_c_fa[dev], part_p_fi[dev],
+          part_p_fa[dev], part_q[dev]);
+    });
+  }
+  for (auto &worker : workers) {
+    worker.join();
+  }
+  for (int status : statuses) {
+    if (status != 0) {
+      return recover_session_for_host_fallback(status, int2);
+    }
+  }
+
+  std::vector<double> c_fi(c_size, 0.0), c_fa(c_size, 0.0);
+  std::vector<double> p_fi(pair_size, 0.0), p_fa(pair_size, 0.0);
+  std::vector<double> q_total(q_size, 0.0);
+  for (int dev = 0; dev < devices; ++dev) {
+    for (std::size_t i = 0; i < c_size; ++i) {
+      c_fi[i] += part_c_fi[dev][i];
+      c_fa[i] += part_c_fa[dev][i];
+    }
+    for (std::size_t i = 0; i < pair_size; ++i) {
+      p_fi[i] += part_p_fi[dev][i];
+      p_fa[i] += part_p_fa[dev][i];
+    }
+    for (std::size_t i = 0; i < q_size; ++i) {
+      q_total[i] += part_q[dev][i];
+    }
+  }
+
+  // Coulomb assigns, exchange accumulates: keep this order.
+  scatter_c1_coulomb(nmo, ndoc, nact, p_fi, int1, fock_i_occ, fock_i_ext);
+  if (ndoc > 0) {
+    scatter_c1_exchange(nmo, ndoc, nact, -1.0, c_fi, fock_i_occ, fock_i_ext);
+  }
+  scatter_c1_coulomb(nmo, ndoc, nact, p_fa, nullptr, fock_a_occ, fock_a_ext);
+  if (nact > 0) {
+    scatter_c1_exchange(nmo, ndoc, nact, -0.5, c_fa, fock_a_occ, fock_a_ext);
+  }
+  for (std::size_t i = 0; i < q_size; ++i) {
+    q_out[i] = q_total[i];
   }
   return 0;
 }

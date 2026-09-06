@@ -657,4 +657,41 @@ module focas_data
 
     end subroutine abort_print
 
+    !> Report that a FOCAS gradient/transform operator could not run on the GPU
+    !! and is falling back to the host implementation.  The fallback is correct
+    !! but orders of magnitude slower for large basis sets, and it is otherwise
+    !! silent, so it must never pass unnoticed: a single failed device
+    !! allocation would look like an unexplained slowdown.  Each distinct
+    !! operator reports once per run.
+    subroutine warn_cuda_fallback(label,status)
+
+      implicit none
+
+      character(len=*), intent(in) :: label
+      integer, intent(in)          :: status
+
+      integer, parameter           :: max_warned_ = 16
+      character(len=32), save      :: warned_(max_warned_) = ''
+      integer, save                :: num_warned_ = 0
+      integer                      :: i
+
+      do i = 1 , num_warned_
+        if ( trim(warned_(i)) == trim(label) ) return
+      end do
+
+      if ( num_warned_ < max_warned_ ) then
+        num_warned_ = num_warned_ + 1
+        warned_(num_warned_) = label
+      end if
+
+      write(*,'(a,a,a,i0,a)') '  ==> [FOCAS-GPU] WARNING: ', trim(label),      &
+        ' could not run on the GPU (status ', status,                          &
+        '); falling back to the host path.'
+      write(*,'(a)') '      This is correct but much slower; check device '//  &
+        'memory and the notices above.'
+
+      return
+
+    end subroutine warn_cuda_fallback
+
 end module focas_data

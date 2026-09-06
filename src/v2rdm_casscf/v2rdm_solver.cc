@@ -29,11 +29,13 @@
 #include <stdlib.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <string>
 #if defined(__unix__) || defined(__APPLE__)
@@ -64,10 +66,8 @@
 
 #include "v2rdm_solver.h"
 
-#ifdef USING_PCMSolver
 #include <pybind11/pybind11.h>
 namespace py = pybind11;
-#endif
 
 #include <focas/focas_c_interface.h>
 #include <misc/blas.h>
@@ -568,7 +568,7 @@ void v2RDMSolver::common_init() {
                                 "ORBOPT_FOCAS_DF_C1_CUDA_NUM_GPUS");
   orbopt_data_[23] =
       (double)(options_.get_bool("ORBOPT_FOCAS_COMPACT_ROTATION") ? 1.0 : 0.0);
-  orbopt_data_[24] = 0.0; // reserved by the legacy C++/Fortran FOCAS ABI
+  orbopt_data_[24] = 0.0; // maximum absolute orbital gradient (output)
 
   scf_maxiter_ = options_.get_int("SCF_MAXITER");
 
@@ -1088,6 +1088,23 @@ void v2RDMSolver::initialize_with_molecular_hamiltonian() {
   }
   outfile->Printf("        frequency:                          %5i\n",
                   options_.get_int("ORBOPT_FREQUENCY"));
+  const bool fixed_frequency_override =
+      options_["ORBOPT_FREQUENCY"].has_changed();
+  const bool effective_adaptive_sdp =
+      options_.get_bool("CASSCF_ADAPTIVE_SDP") &&
+      !fixed_frequency_override;
+  outfile->Printf("        explicit frequency override:        %5s\n",
+                  fixed_frequency_override ? "true" : "false");
+  outfile->Printf("        adaptive SDP macrocycles:           %5s\n",
+                  effective_adaptive_sdp ? "true" : "false");
+  if (effective_adaptive_sdp) {
+    outfile->Printf("        SDP accuracy ladder:                5e-2 x 0.5 to production\n");
+    outfile->Printf("        SDP raw-residual cap:               1e-2\n");
+    outfile->Printf("        ladder energy-change factor:        1e-1\n");
+    outfile->Printf("        ladder promotion confirmations:    %5i\n", 2);
+    outfile->Printf("        production CASSCF energy conv.:    %5.3le\n",
+                    options_.get_double("CASSCF_ENERGY_CONVERGENCE"));
+  }
   outfile->Printf("        active-active rotations:            %5s\n",
                   do_act_act ? "true" : "false");
   outfile->Printf("        exact diagonal Hessian:             %5s\n",
@@ -1772,14 +1789,13 @@ double v2RDMSolver::compute_energy() {
   // generate constraint vector
   BuildConstraints();
 
-  // iterate
-  int orbopt_iter = 0;
-
+  // Iterate. The legacy path retains fixed ORBOPT_FREQUENCY chunks. The
+  // adaptive GPU-ADMM path continuously tightens a geometric accuracy ladder
+  // until the configured production SDP and CASSCF targets are all satisfied.
   int local_maxiter = options_.get_bool("OPTIMIZE_ORBITALS")
                           ? options_.get_int("ORBOPT_FREQUENCY")
                           : options_.get_int("MAXITER");
 
-  bool no_more_orbital_rotations = false;
   sdp_primal_error_ = 1.0;
   sdp_dual_error_ = 1.0;
 
@@ -1855,10 +1871,71 @@ double v2RDMSolver::compute_energy() {
     local_maxiter = 1;
   }
 
-  double previous_total_energy = 1.0e9;
-  int macro_iter = 0;
+  std::shared_ptr<libsdp::GPUADMMSolver> gpu_admm =
+      std::dynamic_pointer_cast<libsdp::GPUADMMSolver>(sdp_);
+  const bool adaptive_sdp_option =
+      options_.get_bool("CASSCF_ADAPTIVE_SDP");
+  const bool fixed_frequency_requested =
+      options_["ORBOPT_FREQUENCY"].has_changed();
+  const bool adaptive_sdp_requested =
+      adaptive_sdp_option && !fixed_frequency_requested;
+  const bool adaptive_sdp = adaptive_sdp_requested && gpu_admm != nullptr;
+  if (fixed_frequency_requested) {
+    outfile->Printf(
+        "            ORBOPT_FREQUENCY was explicitly set to %d; using the "
+        "legacy fixed-frequency CASSCF path%s.\n",
+        options_.get_int("ORBOPT_FREQUENCY"),
+        adaptive_sdp_option ? " and overriding CASSCF_ADAPTIVE_SDP" : "");
+  }
+  if (adaptive_sdp_requested && gpu_admm == nullptr) {
+    outfile->Printf(
+        "            CASSCF_ADAPTIVE_SDP requires SDP_SOLVER GPU_ADMM; "
+        "using the legacy fixed-frequency path.\n");
+  }
 
-  do {
+  const bool optimize_orbitals =
+      options_.get_bool("OPTIMIZE_ORBITALS") && !is_hubbard_ &&
+      !is_external_hamiltonian_;
+  const double production_residual_target =
+      options_.get_double("R_CONVERGENCE");
+  const double production_gap_target = options_.get_double("E_CONVERGENCE");
+  const double casscf_energy_convergence =
+      options_.get_double("CASSCF_ENERGY_CONVERGENCE");
+  // The scalar ladder continues to the tighter of the two production SDP
+  // targets. Effective residual and gap targets stop independently at their
+  // configured values. Normal promotion and macrocycle convergence use the
+  // total CASSCF energy. Two consecutive 0.1*gap passes promote the ladder;
+  // a converged zero-step orbital call promotes immediately at fixed H.
+  // Two consecutive user-level energy passes freeze the orbitals and request
+  // one final solve at the exact user SDP targets.
+  const double sdp_ladder_initial_scale = 5.0e-2;
+  const double sdp_ladder_reduction = 5.0e-1;
+  const double sdp_ladder_energy_factor = 1.0e-1;
+  const int sdp_ladder_promotion_confirmations = 2;
+  const double sdp_ladder_residual_cap = 1.0e-2;
+  const double sdp_ladder_floor =
+      std::min(production_residual_target, production_gap_target);
+  double sdp_ladder_scale_target =
+      std::max(sdp_ladder_floor, sdp_ladder_initial_scale);
+  int sdp_ladder_stage = 0;
+  int sdp_ladder_ready_streak = 0;
+  int casscf_energy_ready_streak = 0;
+  int adaptive_stationary_evaluations = 0;
+  bool adaptive_finalization_requested = false;
+  // final_polish and strict-energy history belong only to the legacy
+  // fixed-frequency path. Adaptive final certification uses the ordinary
+  // ladder loop and the explicit state above.
+  bool final_polish = false;
+  bool hamiltonian_changed = false;
+  bool have_orbital_gradient = false;
+  bool casscf_converged = false;
+  bool stopped_by_iteration_limit = false;
+  double previous_total_energy = 0.0;
+  bool have_previous_total_energy = false;
+  double previous_strict_energy = 0.0;
+  bool have_previous_strict_energy = false;
+
+  while (true) {
 
     if (constrain_gpc_) {
       set_gpc_rdm_nrm();
@@ -1871,118 +1948,74 @@ double v2RDMSolver::compute_energy() {
 #ifdef USING_PCMSolver
     update_solvent();
 #endif
-    int capped_maxiter = capped_sdp_iterations(local_maxiter);
+    const bool strict_sdp_phase =
+        !optimize_orbitals || (!adaptive_sdp && final_polish);
+    double solve_error_convergence = production_residual_target;
+    double solve_objective_convergence = production_gap_target;
+    int requested_sdp_iterations = local_maxiter;
+    bool adaptive_production_phase = false;
+
+    if (adaptive_sdp && optimize_orbitals) {
+      const double residual_target =
+          std::min(sdp_ladder_residual_cap, sdp_ladder_scale_target);
+      solve_error_convergence =
+          std::max(production_residual_target, residual_target);
+      solve_objective_convergence =
+          std::max(production_gap_target, sdp_ladder_scale_target);
+      adaptive_production_phase =
+          solve_error_convergence <= production_residual_target &&
+          solve_objective_convergence <= production_gap_target;
+      // There is no per-macrocycle safety cap. The current ladder target may
+      // use the complete remaining global SDP iteration budget.
+      requested_sdp_iterations = remaining_sdp_iterations();
+    } else if (strict_sdp_phase) {
+      requested_sdp_iterations = remaining_sdp_iterations();
+    }
+
+    int capped_maxiter = capped_sdp_iterations(requested_sdp_iterations);
     if (capped_maxiter <= 0) {
       outfile->Printf(
           "            Total SDP iterations (%ld) reached MAXITER (%d). "
           "Terminating CASSCF.\n",
           sdp_->oiter_total(), options_.get_int("MAXITER"));
+      stopped_by_iteration_limit = true;
       break;
-    } else if (capped_maxiter < local_maxiter) {
+    } else if (capped_maxiter < requested_sdp_iterations) {
       outfile->Printf(
           "            Capping SDP solve chunk from %d to %d iterations "
           "to respect MAXITER (%d).\n",
-          local_maxiter, capped_maxiter, options_.get_int("MAXITER"));
+          requested_sdp_iterations, capped_maxiter,
+          options_.get_int("MAXITER"));
     }
+
+    if (gpu_admm != nullptr) {
+      if (adaptive_sdp) {
+        gpu_admm->configure_casscf_solve(
+            solve_error_convergence, solve_objective_convergence,
+            hamiltonian_changed);
+      } else {
+        gpu_admm->clear_casscf_solve_configuration();
+      }
+    }
+
+    outfile->Printf(
+        "            CASSCF SDP target: phase=%s raw_residual=%9.3le "
+        "absolute_gap=%9.3le maxiter=%d hamiltonian_changed=%s "
+        "ladder_stage=%d\n",
+        adaptive_sdp ? (adaptive_production_phase ? "production"
+                                                  : "intermediate")
+                     : (strict_sdp_phase ? "final_strict" : "intermediate"),
+        solve_error_convergence, solve_objective_convergence, capped_maxiter,
+        hamiltonian_changed ? "true" : "false",
+        adaptive_sdp ? sdp_ladder_stage
+                     : (strict_sdp_phase ? -1 : sdp_ladder_stage));
+
     sdp_->solve(x->pointer(), b->pointer(), c->pointer(), dimensions_,
                 capped_maxiter, evaluate_Au, evaluate_ATu, sdp_monitor, 1,
                 (void *)this);
+    hamiltonian_changed = false;
 
-    bool run_orbopt = !no_more_orbital_rotations;
-
-    bool ran_orbopt = false;
-    if (options_.get_bool("OPTIMIZE_ORBITALS") && !is_hubbard_ &&
-        !is_external_hamiltonian_ && orbopt_iter_total_ < scf_maxiter_ && run_orbopt) {
-
-      double start = omp_get_wtime();
-      int saved_orbopt_maxiter = (int)orbopt_data_[8];
-      if (options_.get_bool("ORBOPT_ADAPTIVE_MAXITER") &&
-          saved_orbopt_maxiter > 0) {
-        int active_orbopt_maxiter =
-            options_.get_int("ORBOPT_ADAPTIVE_START_MAXITER");
-        int final_orbopt_maxiter =
-            options_.get_int("ORBOPT_ADAPTIVE_FINAL_MAXITER");
-        double switch_gradient =
-            options_.get_double("ORBOPT_ADAPTIVE_SWITCH_GRADIENT");
-
-        if (active_orbopt_maxiter <= 0) {
-          active_orbopt_maxiter = saved_orbopt_maxiter;
-        }
-        if (final_orbopt_maxiter <= 0) {
-          final_orbopt_maxiter = saved_orbopt_maxiter;
-        }
-
-        bool use_refinement_maxiter = false;
-        if (switch_gradient > 0.0 && orbopt_iter_total_ > 0 &&
-            fabs(orbopt_data_[11]) <= switch_gradient) {
-          use_refinement_maxiter = true;
-        }
-        if (orbopt_iter_total_ + 1 >= scf_maxiter_) {
-          use_refinement_maxiter = true;
-        }
-
-        if (use_refinement_maxiter) {
-          active_orbopt_maxiter = final_orbopt_maxiter;
-        }
-        if (active_orbopt_maxiter > saved_orbopt_maxiter) {
-          active_orbopt_maxiter = saved_orbopt_maxiter;
-        }
-        if (active_orbopt_maxiter < 1) {
-          active_orbopt_maxiter = 1;
-        }
-
-        outfile->Printf(
-            "            Adaptive orbital maxiter: using %d of %d "
-            "(orbital step %d)\n",
-            active_orbopt_maxiter, saved_orbopt_maxiter,
-            orbopt_iter_total_ + 1);
-        orbopt_data_[8] = (double)active_orbopt_maxiter;
-      }
-      RotateOrbitals();
-      orbopt_data_[8] = (double)saved_orbopt_maxiter;
-      double end = omp_get_wtime();
-
-      orbopt_time_ += end - start;
-      orbopt_iter_total_++;
-      ran_orbopt = true;
-
-      if (options_.get_bool("SAVE_SCF") && !is_hubbard_ &&
-          !is_external_hamiltonian_) {
-        WriteMoldenFile();
-      }
-
-    } else {
-      if (!options_.get_bool("OPTIMIZE_ORBITALS") || orbopt_iter_total_ >= scf_maxiter_ || no_more_orbital_rotations) {
-        orbopt_converged_ = true;
-      }
-    }
-
-    if (ran_orbopt) {
-      double energy_primal = C_DDOT(n_primal_, c->pointer(), 1, x->pointer(), 1);
-      double total_energy = energy_primal + enuc_ + efzc_;
-#ifdef USING_PCMSolver
-      if (solvent_enabled()) {
-        total_energy -= Tr_D_Vsolv_;
-        total_energy += E_solv_;
-      }
-#endif
-      outfile->Printf("            Total energy: %20.12lf\n", total_energy);
-
-      double total_energy_change = 0.0;
-      if (macro_iter > 0) {
-        total_energy_change = total_energy - previous_total_energy;
-        outfile->Printf("            Change in total energy: %20.12lf\n", total_energy_change);
-      }
-
-      double e_conv = options_.get_double("E_CONVERGENCE");
-      if (macro_iter > 0 && fabs(total_energy_change) < 0.1 * e_conv && !sdp_->is_converged()) {
-        outfile->Printf("            Change in total energy (%5.3le) is less than 0.1 * E_CONVERGENCE (%5.3le).\n", fabs(total_energy_change), 0.1 * e_conv);
-        outfile->Printf("            Disabling further orbital rotations. Solving SDP to convergence.\n");
-        no_more_orbital_rotations = true;
-        orbopt_converged_ = true;
-      }
-    }
-
+    // This energy is consistent: both c and x belong to the current orbitals.
     double energy_primal = C_DDOT(n_primal_, c->pointer(), 1, x->pointer(), 1);
     double total_energy = energy_primal + enuc_ + efzc_;
 #ifdef USING_PCMSolver
@@ -1991,32 +2024,355 @@ double v2RDMSolver::compute_energy() {
       total_energy += E_solv_;
     }
 #endif
-
-    if (ran_orbopt) {
-      if ((options_.get_str("SDP_SOLVER") == "BPSDP" || options_.get_str("SDP_SOLVER") == "GPU_ADMM") && macro_iter > 0 && total_energy >= previous_total_energy) {
-        outfile->Printf("            WARNING: SDP energy did not decrease (previous: %20.12lf, current: %20.12lf). Continuing CASSCF.\n", previous_total_energy, total_energy);
-      }
-      previous_total_energy = total_energy;
-      macro_iter++;
+    outfile->Printf("            Consistent CASSCF energy: %20.12lf\n",
+                    total_energy);
+    double consistent_energy_change = 0.0;
+    const bool have_consistent_energy_change = have_previous_total_energy;
+    if (have_consistent_energy_change) {
+      consistent_energy_change = total_energy - previous_total_energy;
+      outfile->Printf("            Change in consistent energy: %20.12lf\n",
+                      consistent_energy_change);
     }
-
-    if (sdp_->oiter_total() >= options_.get_int("MAXITER")) {
-      outfile->Printf("            Total SDP iterations (%ld) reached MAXITER (%d). Terminating CASSCF.\n", sdp_->oiter_total(), options_.get_int("MAXITER"));
+    if (!optimize_orbitals) {
+      previous_total_energy = total_energy;
+      have_previous_total_energy = true;
+      if (write_checkpoint_each_step) {
+        WriteCheckpointFile();
+      }
+      casscf_converged = sdp_->is_converged();
       break;
     }
 
+    // Only a solve that was asked to reach a target can fail to reach one.  In
+    // the legacy fixed-frequency path the solver is *meant* to stop after
+    // exactly ORBOPT_FREQUENCY iterations without a converged certificate: that
+    // chunk boundary is the rotation trigger, not a failure, so treating it as
+    // budget exhaustion would end the CASSCF after a single macrocycle.
+    // Genuine global MAXITER exhaustion is still caught by the capped_maxiter
+    // check above, which runs on every path.
+    const bool solve_had_target = adaptive_sdp || strict_sdp_phase;
+    if (solve_had_target && !sdp_->is_converged()) {
+      outfile->Printf(
+          "            SDP solve exhausted the global MAXITER budget before "
+          "reaching the %s target.\n",
+          strict_sdp_phase ? "final-polish" : "orbital-ladder");
+      stopped_by_iteration_limit = true;
+      break;
+    }
+
+    // Commit the energy history only after the current Hamiltonian has an SDP
+    // certificate strong enough to permit validation or rotation.
+    previous_total_energy = total_energy;
+    have_previous_total_energy = true;
+
     if (write_checkpoint_each_step) {
+      // Checkpoint only a certified, consistent c/x state, never the old RDM
+      // paired with a just-rotated Hamiltonian.
       WriteCheckpointFile();
     }
 
-    outfile->Printf("\n");
+    // Adaptive mode follows the traditional energy-led CASSCF contract. The
+    // orbital gradient remains diagnostic and may stop an individual FOCAS
+    // call, but it cannot force the macrocycle ladder to overconverge. Two
+    // consecutive user-level energy passes request a final solve with frozen
+    // orbitals. That solve must reach the exact user SDP limits, and its energy
+    // must remain within the user CASSCF tolerance.
+    if (adaptive_sdp) {
+      const bool casscf_energy_ready =
+          have_consistent_energy_change &&
+          fabs(consistent_energy_change) <= casscf_energy_convergence;
+      if (casscf_energy_ready) {
+        casscf_energy_ready_streak++;
+      } else {
+        casscf_energy_ready_streak = 0;
+      }
 
-  } while (!orbopt_converged_ || !sdp_->is_converged());
+      if (adaptive_finalization_requested) {
+        outfile->Printf(
+            "            CASSCF final certification: polished_dE=%9.3le "
+            "target=%9.3le energy_converged=%s\n",
+            have_consistent_energy_change
+                ? fabs(consistent_energy_change)
+                : std::numeric_limits<double>::quiet_NaN(),
+            casscf_energy_convergence,
+            casscf_energy_ready ? "true" : "false");
+        if (adaptive_production_phase && casscf_energy_ready) {
+          outfile->Printf(
+              "            Final user SDP certificate and CASSCF energy "
+              "change are converged; orbital gradient is diagnostic only.\n");
+          casscf_converged = true;
+          break;
+        }
+
+        // The intermediate plateau was not stable under the user-accuracy
+        // solve. Use this production-quality RDM for the next rotation and
+        // retain production accuracy for every subsequent SDP solve.
+        adaptive_finalization_requested = false;
+        casscf_energy_ready_streak = 0;
+        sdp_ladder_ready_streak = 0;
+        sdp_ladder_scale_target = sdp_ladder_floor;
+        outfile->Printf(
+            "            Final SDP polish changed the CASSCF energy by more "
+            "than %9.3le; resuming orbital search at production SDP "
+            "accuracy (raw residual %9.3le, absolute gap %9.3le).\n",
+            casscf_energy_convergence, production_residual_target,
+            production_gap_target);
+      } else if (adaptive_production_phase &&
+                 casscf_energy_ready_streak >=
+                     sdp_ladder_promotion_confirmations) {
+        // The ordinary ladder reached the user SDP targets without an early
+        // jump. The present state already has the final certificate, so a
+        // redundant extra production solve is unnecessary.
+        outfile->Printf(
+            "            Production SDP certificate and two consecutive "
+            "CASSCF energy changes are converged; orbital gradient is "
+            "diagnostic only.\n");
+        casscf_converged = true;
+        break;
+      } else if (!adaptive_production_phase &&
+                 casscf_energy_ready_streak >=
+                     sdp_ladder_promotion_confirmations) {
+        adaptive_finalization_requested = true;
+        sdp_ladder_scale_target = sdp_ladder_floor;
+        sdp_ladder_stage++;
+        sdp_ladder_ready_streak = 0;
+        outfile->Printf(
+            "            CASSCF energy converged for %d consecutive "
+            "macrocycles; freezing orbitals and requesting the final user "
+            "SDP certificate (raw residual %9.3le, absolute gap %9.3le).\n",
+            sdp_ladder_promotion_confirmations,
+            production_residual_target, production_gap_target);
+        // Do not rotate after the energy convergence decision. The next solve
+        // polishes this same Hamiltonian, so its energy change directly tests
+        // whether the intermediate plateau was trustworthy.
+        continue;
+      }
+    }
+
+    if (strict_sdp_phase) {
+      const bool have_strict_energy_change = have_previous_strict_energy;
+      const double strict_energy_change =
+          have_strict_energy_change ? total_energy - previous_strict_energy
+                                    : 0.0;
+      previous_strict_energy = total_energy;
+      have_previous_strict_energy = true;
+      if (have_strict_energy_change) {
+        outfile->Printf(
+            "            Change between strict CASSCF energies: %20.12lf\n",
+            strict_energy_change);
+      }
+
+      const int saved_orbopt_maxiter = (int)orbopt_data_[8];
+      const double validation_start = omp_get_wtime();
+      orbopt_data_[8] = 0.0;
+      RotateOrbitals();
+      orbopt_data_[8] = (double)saved_orbopt_maxiter;
+      orbopt_time_ += omp_get_wtime() - validation_start;
+      have_orbital_gradient = true;
+
+      if (orbopt_converged_ && have_strict_energy_change &&
+          fabs(strict_energy_change) < casscf_energy_convergence) {
+        outfile->Printf(
+            "            Final strict RDM, CASSCF energy, and orbital "
+            "gradient are mutually converged.\n");
+        casscf_converged = true;
+        break;
+      }
+
+      if (orbopt_converged_) {
+        outfile->Printf(
+            "            Strict orbital gradient is converged; repeating the "
+            "strict energy check (target %5.3le).\n",
+            casscf_energy_convergence);
+        continue;
+      }
+
+      if (orbopt_iter_total_ >= scf_maxiter_ || saved_orbopt_maxiter <= 0) {
+        outfile->Printf(
+            "            Final orbital-gradient validation failed, but the "
+            "orbital-optimization iteration limit has been reached.\n");
+        break;
+      }
+
+      outfile->Printf(
+          "            Strict-RDM orbital-gradient validation failed; "
+          "performing a full orbital refinement.\n");
+    }
+
+    const bool no_sdp_iterations_remaining =
+        remaining_sdp_iterations() <= 0;
+    const bool orbital_macroiteration_limit_reached =
+        orbopt_iter_total_ >= scf_maxiter_;
+
+    if (no_sdp_iterations_remaining) {
+      outfile->Printf(
+          "            No SDP iterations remain for a post-rotation solve; "
+          "leaving the current consistent state unchanged.\n");
+      stopped_by_iteration_limit = true;
+      break;
+    }
+
+    if (orbital_macroiteration_limit_reached) {
+      if (adaptive_sdp) {
+        outfile->Printf(
+            "            Orbital-optimization macroiteration limit (%d) "
+            "reached before all production convergence targets.\n",
+            scf_maxiter_);
+        break;
+      } else {
+        outfile->Printf(
+            "            Orbital-optimization macroiteration limit (%d) "
+            "reached; entering final strict SDP polish.\n",
+            scf_maxiter_);
+        final_polish = true;
+        have_previous_strict_energy = false;
+        continue;
+      }
+    }
+
+    double start = omp_get_wtime();
+    int saved_orbopt_maxiter = (int)orbopt_data_[8];
+    if (options_.get_bool("ORBOPT_ADAPTIVE_MAXITER") &&
+        saved_orbopt_maxiter > 0) {
+      int active_orbopt_maxiter =
+          options_.get_int("ORBOPT_ADAPTIVE_START_MAXITER");
+      int final_orbopt_maxiter =
+          options_.get_int("ORBOPT_ADAPTIVE_FINAL_MAXITER");
+      double switch_gradient =
+          options_.get_double("ORBOPT_ADAPTIVE_SWITCH_GRADIENT");
+
+      if (active_orbopt_maxiter <= 0) {
+        active_orbopt_maxiter = saved_orbopt_maxiter;
+      }
+      if (final_orbopt_maxiter <= 0) {
+        final_orbopt_maxiter = saved_orbopt_maxiter;
+      }
+
+      bool use_refinement_maxiter =
+          switch_gradient > 0.0 && have_orbital_gradient &&
+          fabs(orbopt_data_[11]) <= switch_gradient;
+      if (orbopt_iter_total_ + 1 >= scf_maxiter_) {
+        use_refinement_maxiter = true;
+      }
+
+      if (use_refinement_maxiter) {
+        active_orbopt_maxiter = final_orbopt_maxiter;
+      }
+      active_orbopt_maxiter =
+          std::max(1, std::min(saved_orbopt_maxiter, active_orbopt_maxiter));
+
+      outfile->Printf(
+          "            Adaptive orbital maxiter: using %d of %d "
+          "(orbital step %d)\n",
+          active_orbopt_maxiter, saved_orbopt_maxiter,
+          orbopt_iter_total_ + 1);
+      orbopt_data_[8] = (double)active_orbopt_maxiter;
+    }
+
+    RotateOrbitals();
+    orbopt_data_[8] = (double)saved_orbopt_maxiter;
+    orbopt_time_ += omp_get_wtime() - start;
+    have_orbital_gradient = true;
+    const bool orbitals_changed = (int)orbopt_data_[10] > 0;
+    const bool stationary_orbitals =
+        (int)orbopt_data_[10] == 0 && orbopt_converged_;
+    if (adaptive_sdp && stationary_orbitals) {
+      // A converged gradient-only result must not consume the orbital-step
+      // budget while the SDP accuracy is being refined on the same orbitals.
+      adaptive_stationary_evaluations++;
+    } else {
+      orbopt_iter_total_++;
+    }
+    hamiltonian_changed = orbitals_changed;
+
+    const double orbital_energy_change = fabs(orbopt_data_[12]);
+    if (adaptive_sdp && !adaptive_production_phase) {
+      const double casscf_promotion_threshold =
+          std::max(casscf_energy_convergence,
+                   sdp_ladder_energy_factor * solve_objective_convergence);
+      const bool casscf_ladder_ready =
+          have_consistent_energy_change &&
+          fabs(consistent_energy_change) <= casscf_promotion_threshold;
+      if (casscf_ladder_ready) {
+        sdp_ladder_ready_streak++;
+      } else {
+        sdp_ladder_ready_streak = 0;
+      }
+      outfile->Printf(
+          "            CASSCF SDP ladder: stage=%d casscf_dE=%9.3le "
+          "ladder_threshold=%9.3le ladder_ready=%s "
+          "ladder_streak=%d/%d user_threshold=%9.3le "
+          "user_streak=%d/%d orbital_dE=%9.3le "
+          "orbital_gradient=%9.3le\n",
+          sdp_ladder_stage,
+          have_consistent_energy_change
+              ? fabs(consistent_energy_change)
+              : std::numeric_limits<double>::quiet_NaN(),
+          casscf_promotion_threshold,
+          casscf_ladder_ready ? "true" : "false",
+          sdp_ladder_ready_streak, sdp_ladder_promotion_confirmations,
+          casscf_energy_convergence, casscf_energy_ready_streak,
+          sdp_ladder_promotion_confirmations, orbital_energy_change,
+          fabs(orbopt_data_[11]));
+      if (stationary_orbitals || sdp_ladder_ready_streak >=
+          sdp_ladder_promotion_confirmations) {
+        if (stationary_orbitals) {
+          outfile->Printf(
+              "            Stationary orbital evaluation: no rotation; "
+              "tightening the SDP target on the unchanged Hamiltonian "
+              "without waiting for energy-promotion confirmations.\n");
+        }
+        sdp_ladder_scale_target =
+            std::max(sdp_ladder_floor,
+                     sdp_ladder_scale_target * sdp_ladder_reduction);
+        sdp_ladder_stage++;
+        sdp_ladder_ready_streak = 0;
+        const double next_residual_target =
+            std::max(production_residual_target,
+                     std::min(sdp_ladder_residual_cap,
+                              sdp_ladder_scale_target));
+        const double next_gap_target =
+            std::max(production_gap_target, sdp_ladder_scale_target);
+        outfile->Printf(
+            "            CASSCF SDP ladder advanced to stage %d "
+            "(raw residual target %9.3le, absolute gap target %9.3le).\n",
+            sdp_ladder_stage, next_residual_target, next_gap_target);
+      }
+    } else if (adaptive_sdp && adaptive_production_phase) {
+      outfile->Printf(
+          "            Production SDP target retained: CASSCF energy "
+          "streak=%d/%d (target %9.3le); orbital gradient=%9.3le is "
+          "diagnostic only.\n",
+          casscf_energy_ready_streak, sdp_ladder_promotion_confirmations,
+          casscf_energy_convergence, fabs(orbopt_data_[11]));
+    }
+
+    if (options_.get_bool("SAVE_SCF")) {
+      WriteMoldenFile();
+    }
+
+    if (!adaptive_sdp && orbopt_converged_) {
+      outfile->Printf(
+          "            Orbital optimizer reached its local criteria; entering "
+          "mandatory final strict SDP polish.\n");
+      final_polish = true;
+      have_previous_strict_energy = false;
+    }
+
+    outfile->Printf("\n");
+  }
 
   // free(tmp);
 
   outfile->Printf("\n");
-  outfile->Printf("      v2RDM iterations converged!\n");
+  if (casscf_converged) {
+    outfile->Printf("      v2RDM iterations converged!\n");
+  } else {
+    outfile->Printf("      v2RDM-CASSCF iterations did not converge%s.\n",
+                    stopped_by_iteration_limit
+                        ? " before the SDP iteration limit"
+                        : "");
+  }
   outfile->Printf("\n");
 
   // evaluate spin squared
@@ -2249,6 +2605,10 @@ double v2RDMSolver::compute_energy() {
                   sdp_->oiter_total());
   outfile->Printf("      Orbital optimization steps: %12li\n",
                   orbopt_iter_total_);
+  if (adaptive_sdp) {
+    outfile->Printf("      Stationary orbital evaluations: %7d\n",
+                    adaptive_stationary_evaluations);
+  }
   outfile->Printf("\n");
   outfile->Printf("  ==> Wall time <==\n");
   outfile->Printf("\n");
@@ -2367,7 +2727,6 @@ void v2RDMSolver::EnergyByComponent(double &kinetic, double &potential,
 
 void v2RDMSolver::WriteMoldenFile() {
 
-#ifdef USING_PCMSolver
   FinalizeOPDM();
 
   std::string filename = options_.get_str("MOLDEN_FILE");
@@ -2376,6 +2735,43 @@ void v2RDMSolver::WriteMoldenFile() {
                ".molden";
   }
 
+  // NAT_ORBS selects which orbital basis is written.
+  //
+  //   false -> natural SPIN orbitals.  write_molden(use_natural=true)
+  //            diagonalizes Da and Db separately, giving distinct alpha and
+  //            beta orbital sets with per-spin occupations in [0,1].
+  //
+  //   true  -> SPIN-FREE natural orbitals.  Handing both spin blocks the same
+  //            spin-summed density makes that same diagonalization return one
+  //            common orbital set; molden still lists the two occupations
+  //            separately, but each is n/2 so they sum to the spin-free
+  //            n in [0,2].
+  //
+  // Cb_ is aligned with Ca_ for the spin-free write because FinalizeOPDM builds
+  // BOTH densities from Ca_ (the transform is restricted) while
+  // ComputeNaturalOrbitals rotates only Ca_.  Without this the beta block would
+  // pair beta occupations with un-rotated orbitals.
+  const bool spin_free_molden = options_.get_bool("NAT_ORBS");
+  std::shared_ptr<Matrix> saved_Da, saved_Db, saved_Cb;
+  if (spin_free_molden) {
+    saved_Da = std::shared_ptr<Matrix>(new Matrix(Da_));
+    saved_Db = std::shared_ptr<Matrix>(new Matrix(Db_));
+    saved_Cb = std::shared_ptr<Matrix>(new Matrix(Cb_));
+    std::shared_ptr<Matrix> Dsf(new Matrix(Da_));
+    Dsf->add(Db_);
+    Dsf->scale(0.5);
+    Da_->copy(Dsf);
+    Db_->copy(Dsf);
+    Cb_->copy(Ca_);
+  }
+  auto restore_densities = [&]() {
+    if (spin_free_molden) {
+      Da_->copy(saved_Da);
+      Db_->copy(saved_Db);
+      Cb_->copy(saved_Cb);
+    }
+  };
+
   try {
     py::gil_scoped_acquire gil;
     py::module_::import("psi4.driver.p4util.writer");
@@ -2383,214 +2779,18 @@ void v2RDMSolver::WriteMoldenFile() {
     py::object py_wfn = py::cast(wfn);
     py_wfn.attr("write_molden")(filename, true, true);
   } catch (const py::error_already_set& ex) {
+    restore_densities();
     throw PsiException("Failed to write v2RDM-CASSCF Molden file: " +
                            std::string(ex.what()),
                        __FILE__, __LINE__);
   }
+  restore_densities();
 
-  outfile->Printf("    Wrote v2RDM-CASSCF Molden file: %s\n",
-                  filename.c_str());
+  outfile->Printf("    Wrote v2RDM-CASSCF Molden file: %s (%s natural "
+                  "orbitals)\n",
+                  filename.c_str(),
+                  spin_free_molden ? "spin-free" : "spin");
   return;
-#endif
-
-  // it is possible the 1-RDM is already in the NO basis:
-  // Additionally NAT_ORBS True does the spin molden file
-  if (options_.get_bool("NAT_ORBS") || options_.get_bool("FCIDUMP") ||
-      options_.get_bool("EXTENDED_KOOPMANS")) {
-
-    std::shared_ptr<Matrix> Da(new Matrix(nirrep_, nmopi_, nmopi_));
-    std::shared_ptr<Matrix> eigveca(new Matrix(nirrep_, nmopi_, nmopi_));
-    std::shared_ptr<Vector> eigvala = std::make_shared<Vector>(
-        "Natural Orbital Occupation Numbers (spin free)", nmopi_);
-    std::shared_ptr<Matrix> Db(new Matrix(nirrep_, nmopi_, nmopi_));
-    std::shared_ptr<Matrix> eigvecb(new Matrix(nirrep_, nmopi_, nmopi_));
-    std::shared_ptr<Vector> eigvalb = std::make_shared<Vector>(
-        "Natural Orbital Occupation Numbers (spin free)", nmopi_);
-    for (int h = 0; h < nirrep_; h++) {
-      for (int i = 0; i < frzcpi_[h] + rstcpi_[h]; i++) {
-        Da->pointer(h)[i][i] = 1.0;
-        Db->pointer(h)[i][i] = 1.0;
-      }
-      for (int i = rstcpi_[h] + frzcpi_[h];
-           i < nmopi_[h] - rstvpi_[h] - frzvpi_[h]; i++) {
-        for (int j = rstcpi_[h] + frzcpi_[h];
-             j < nmopi_[h] - rstvpi_[h] - frzvpi_[h]; j++) {
-          Da->pointer(h)[i][j] =
-              x->pointer()[d1aoff[h] +
-                           (i - rstcpi_[h] - frzcpi_[h]) * amopi_[h] +
-                           (j - rstcpi_[h] - frzcpi_[h])];
-          Db->pointer(h)[i][j] =
-              x->pointer()[d1boff[h] +
-                           (i - rstcpi_[h] - frzcpi_[h]) * amopi_[h] +
-                           (j - rstcpi_[h] - frzcpi_[h])];
-        }
-      }
-    }
-    Da->diagonalize(eigveca, eigvala, descending);
-    Db->diagonalize(eigvecb, eigvalb, descending);
-    eigveca->print();
-    eigvecb->print();
-
-    std::shared_ptr<Matrix> Cno_a(new Matrix(Ca_));
-    std::shared_ptr<Matrix> Cno_b(new Matrix(Ca_));
-
-    for (int h = 0; h < nirrep_; h++) {
-      for (int mu = 0; mu < nsopi_[h]; mu++) {
-        double *temp = (double *)malloc(nmopi_[h] * sizeof(double));
-        double **cp = Cno_a->pointer(h);
-        double **ep = eigveca->pointer(h);
-        for (int i = 0; i < nmopi_[h]; i++) {
-          double dum = 0.0;
-          for (int j = 0; j < nmopi_[h]; j++) {
-            dum += cp[mu][j] * ep[j][i];
-          }
-          temp[i] = dum;
-        }
-        for (int i = 0; i < nmopi_[h]; i++) {
-          cp[mu][i] = temp[i];
-        }
-        free(temp);
-      }
-    }
-
-    for (int h = 0; h < nirrep_; h++) {
-      for (int mu = 0; mu < nsopi_[h]; mu++) {
-        double *temp = (double *)malloc(nmopi_[h] * sizeof(double));
-        double **cp = Cno_b->pointer(h);
-        double **ep = eigvecb->pointer(h);
-        for (int i = 0; i < nmopi_[h]; i++) {
-          double dum = 0.0;
-          for (int j = 0; j < nmopi_[h]; j++) {
-            dum += cp[mu][j] * ep[j][i];
-          }
-          temp[i] = dum;
-        }
-        for (int i = 0; i < nmopi_[h]; i++) {
-          cp[mu][i] = temp[i];
-        }
-        free(temp);
-      }
-    }
-
-    // Print a molden file
-    if (options_["RESTART_FROM_CHECKPOINT_FILE"].has_changed()) {
-      throw PsiException(
-          "printing orbitals is currently disabled when restarting v2rdm jobs. "
-          " i can't remember why, though... sorry!",
-          __FILE__, __LINE__);
-    }
-    outfile->Printf(
-        "Warning: Writing molden file from C++ is not supported with Psi4 "
-        "v1.10. Use Python's psi4.driver.molden function instead.\n");
-    /*
-    //std::shared_ptr<MoldenWriter> molden(new
-    MoldenWriter((std::shared_ptr<Wavefunction>)this));
-    std::shared_ptr<MoldenWriter> molden(new
-    MoldenWriter(reference_wavefunction_)); std::shared_ptr<Vector> zero =
-    std::make_shared<Vector>(nmopi_); zero->zero(); std::string filename =
-    get_writer_file_prefix(reference_wavefunction_->molecule()->name()) +
-    ".molden"; molden->write(filename,Cno_a,Cno_b,zero,
-    zero,eigvala,eigvalb,true);
-    */
-
-    // otherwise, we need to compute the natural orbitals:
-  } else {
-    std::shared_ptr<Matrix> D(new Matrix(nirrep_, nmopi_, nmopi_));
-    std::shared_ptr<Matrix> eigvec(new Matrix(nirrep_, nmopi_, nmopi_));
-    std::shared_ptr<Vector> eigval = std::make_shared<Vector>(
-        "Natural Orbital Occupation Numbers (spin free)", nmopi_);
-    for (int h = 0; h < nirrep_; h++) {
-      for (int i = 0; i < frzcpi_[h] + rstcpi_[h]; i++) {
-        D->pointer(h)[i][i] = 1.0;
-      }
-      for (int i = rstcpi_[h] + frzcpi_[h];
-           i < nmopi_[h] - rstvpi_[h] - frzvpi_[h]; i++) {
-        for (int j = rstcpi_[h] + frzcpi_[h];
-             j < nmopi_[h] - rstvpi_[h] - frzvpi_[h]; j++) {
-          D->pointer(h)[i][j] =
-              0.5 * x->pointer()[d1aoff[h] +
-                                 (i - rstcpi_[h] - frzcpi_[h]) * amopi_[h] +
-                                 (j - rstcpi_[h] - frzcpi_[h])];
-          D->pointer(h)[i][j] +=
-              0.5 * x->pointer()[d1boff[h] +
-                                 (i - rstcpi_[h] - frzcpi_[h]) * amopi_[h] +
-                                 (j - rstcpi_[h] - frzcpi_[h])];
-        }
-      }
-    }
-    std::shared_ptr<Matrix> saved(new Matrix(D));
-    D->diagonalize(eigvec, eigval, descending);
-
-    std::shared_ptr<Matrix> Cno(new Matrix(Ca_));
-
-    // Ca_->print();
-    //  build AO/NO transformation matrix
-    for (int h = 0; h < nirrep_; h++) {
-      for (int mu = 0; mu < nsopi_[h]; mu++) {
-        double *temp = (double *)malloc(nmopi_[h] * sizeof(double));
-        double **cp = Cno->pointer(h);
-        double **ep = eigvec->pointer(h);
-        for (int i = 0; i < nmopi_[h]; i++) {
-          double dum = 0.0;
-          for (int j = 0; j < nmopi_[h]; j++) {
-            dum += cp[mu][j] * ep[j][i];
-          }
-          temp[i] = dum;
-        }
-        for (int i = 0; i < nmopi_[h]; i++) {
-          cp[mu][i] = temp[i];
-        }
-        free(temp);
-      }
-    }
-    //    // build AO/NO transformation matrix (both Ca_ and Cb_)
-    // for (int h = 0; h < nirrep_; h++) {
-    //    for (int mu = 0; mu < nsopi_[h]; mu++) {
-    //        double *  temp = (double*)malloc(nmopi_[h]*sizeof(double));
-    //        double ** ep   = eigvec->pointer(h);
-    //        double ** cp = Ca_->pointer(h);
-    //        for (int i = rstcpi_[h] + frzcpi_[h]; i <
-    //        nmopi_[h]-rstvpi_[h]-frzvpi_[h]; i++) {
-    //            double dum = 0.0;
-    //            for (int j = rstcpi_[h] + frzcpi_[h]; j <
-    //            nmopi_[h]-rstvpi_[h]-frzvpi_[h]; j++) {
-    //                dum += cp[mu][j] *
-    //                ep[j-rstcpi_[h]-frzcpi_[h]][i-rstcpi_[h]-frzcpi_[h]];
-    //            }
-    //            temp[i] = dum;
-    //        }
-    //        for (int i = rstcpi_[h] + frzcpi_[h]; i <
-    //        nmopi_[h]-rstvpi_[h]-frzvpi_[h]; i++) {
-    //            cp[mu][i] = temp[i];
-    //        }
-    //        free(temp);
-    //    }
-    //}
-
-    Cno->print();
-    eigvec->print();
-    eigval->print();
-
-    // Print a molden file
-    if (options_["RESTART_FROM_CHECKPOINT_FILE"].has_changed()) {
-      throw PsiException(
-          "printing orbitals is currently disabled when restarting v2rdm jobs. "
-          " i can't remember why, though... sorry!",
-          __FILE__, __LINE__);
-    }
-    outfile->Printf(
-        "Warning: Writing molden file from C++ is not supported with Psi4 "
-        "v1.10. Use Python's psi4.driver.molden function instead.\n");
-    /*
-    //std::shared_ptr<MoldenWriter> molden(new
-    MoldenWriter((std::shared_ptr<Wavefunction>)this));
-    std::shared_ptr<MoldenWriter> molden(new
-    MoldenWriter(reference_wavefunction_)); std::shared_ptr<Vector> zero =
-    std::make_shared<Vector>(nmopi_); zero->zero(); std::string filename =
-    get_writer_file_prefix(reference_wavefunction_->molecule()->name()) +
-    ".molden"; molden->write(filename,Cno,Cno,zero, zero,eigval,eigval,true);
-    */
-  }
 }
 
 void v2RDMSolver::FinalizeOPDM() {
@@ -4453,6 +4653,14 @@ void v2RDMSolver::update_ddx() {
 
 void v2RDMSolver::RotateOrbitals() {
 
+  const bool gradient_only = orbopt_data_[8] == 0.0;
+  if (orbopt_data_[8] >= 0.0) {
+    // Convergence belongs to this FOCAS evaluation; it must not remain sticky
+    // after a prior macroiteration happened to satisfy the thresholds.
+    orbopt_converged_ = false;
+    orbopt_data_[13] = 0.0;
+  }
+
   PackSpatialDensity();
   orbopt_data_[18] = focas_df_c1_scratch_budget_mib(options_);
 
@@ -4514,7 +4722,7 @@ void v2RDMSolver::RotateOrbitals() {
            orbopt_outfile_, X_);
   }
 
-  if (orbopt_data_[8] > 0) {
+  if (orbopt_data_[8] >= 0) {
 
     if (fabs(orbopt_data_[12]) < orbopt_data_[4] &&
         fabs(orbopt_data_[11]) < orbopt_data_[3]) {
@@ -4522,17 +4730,28 @@ void v2RDMSolver::RotateOrbitals() {
       orbopt_data_[13] = 1.0;
     }
 
-    outfile->Printf("            Orbital Optimization %s in %3i iterations \n",
-                    orbopt_converged_ ? "converged" : "did not converge",
-                    (int)orbopt_data_[10]);
+    if (gradient_only) {
+      outfile->Printf(
+          "            Orbital gradient validation %s in %3i iterations \n",
+          orbopt_converged_ ? "converged" : "did not converge",
+          (int)orbopt_data_[10]);
+    } else {
+      outfile->Printf("            Orbital Optimization %s in %3i iterations \n",
+                      orbopt_converged_ ? "converged" : "did not converge",
+                      (int)orbopt_data_[10]);
+    }
     outfile->Printf("            Total energy change: %11.6le\n",
                     orbopt_data_[12]);
     outfile->Printf("            Final gradient norm: %11.6le\n",
                     orbopt_data_[11]);
+    outfile->Printf("            Maximum gradient element: %11.6le\n",
+                    orbopt_data_[24]);
     outfile->Printf("\n");
   }
 
-  RepackIntegrals();
+  if (!gradient_only && (int)orbopt_data_[10] > 0) {
+    RepackIntegrals();
+  }
 }
 
 void v2RDMSolver::determine_n_primal() {

@@ -116,6 +116,30 @@ public:
 
   ~GPUADMMSolver() {}
 
+  /// Configure convergence handling for the next CASSCF SDP solve. Negative
+  /// convergence values restore the solver-wide defaults.
+  void configure_casscf_solve(double error_convergence,
+                              double objective_convergence,
+                              bool hamiltonian_changed,
+                              bool entry_diagnostics = true) {
+    runtime_error_convergence_ = error_convergence;
+    runtime_objective_convergence_ = objective_convergence;
+    // Energy stagnation is not a convergence certificate for adaptive
+    // CASSCF. Intermediate and final user-accuracy solves must reach the
+    // requested gap.
+    runtime_options_["require_gap_convergence"] = 1.0;
+    runtime_options_["gap_relative"] = 0.0;
+    runtime_options_["hamiltonian_changed"] =
+        hamiltonian_changed ? 1.0 : 0.0;
+    runtime_options_["entry_diagnostics"] = entry_diagnostics ? 1.0 : 0.0;
+  }
+
+  void clear_casscf_solve_configuration() {
+    runtime_error_convergence_ = -1.0;
+    runtime_objective_convergence_ = -1.0;
+    runtime_options_.clear();
+  }
+
   void solve(double *x, double *b, double *c, std::vector<int> primal_block_dim,
              int maxiter, SDPCallbackFunction evaluate_Au,
              SDPCallbackFunction evaluate_ATu,
@@ -769,12 +793,24 @@ public:
       for (const auto &kv : accel_options_) {
         py_accel_options[pybind11::str(kv.first)] = kv.second;
       }
+      for (const auto &kv : runtime_options_) {
+        py_accel_options[pybind11::str(kv.first)] = kv.second;
+      }
+
+      const double solve_error_convergence =
+          runtime_error_convergence_ > 0.0
+              ? runtime_error_convergence_
+              : options_.sdp_error_convergence;
+      const double solve_objective_convergence =
+          runtime_objective_convergence_ > 0.0
+              ? runtime_objective_convergence_
+              : options_.sdp_objective_convergence;
 
       // Call PyTorch-based ADMM solver in python
       pybind11::tuple result = gpu_admm_solve(
           py_c, py_b, primal_block_dim, py_rows, py_cols, py_vals,
           py_progress_monitor, py_x, py_y, py_z, mu_, maxiter,
-          options_.sdp_error_convergence, options_.sdp_objective_convergence,
+          solve_error_convergence, solve_objective_convergence,
           options_.cg_maxiter, options_.cg_convergence,
           options_.dynamic_cg_convergence, options_.mu_update_frequency,
           print_level, oiter_, iiter_total_, profile_timing_, py_a_crow,
@@ -1252,6 +1288,9 @@ private:
   // Convergence options forwarded verbatim to the Python solver
   // (over-relaxation, relative gap, energy-stagnation stop).
   std::map<std::string, double> accel_options_;
+  double runtime_error_convergence_ = -1.0;
+  double runtime_objective_convergence_ = -1.0;
+  std::map<std::string, double> runtime_options_;
 };
 
 } // namespace libsdp

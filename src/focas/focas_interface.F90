@@ -111,7 +111,9 @@ subroutine focas_interface(mo_coeff_out,integrals_1,nnz_i1,integrals_2,nnz_i2,de
 
   nnz_den2 = sum(nnz_den_new)
 
-  if ( int(orbopt_data_io(9)) > 0 ) then
+  ! maxiter=0 is a gradient-only evaluation used by the CASSCF final-polish
+  ! state. Positive values retain the normal orbital optimization path.
+  if ( int(orbopt_data_io(9)) >= 0 ) then
 
     call focas_optimize(mo_coeff,integrals_1,nnz_int1,integrals_2,nnz_int2,               &
                       & density_1(1:nnz_den1),nnz_den1,density_2(1:nnz_den2),nnz_den2,    &

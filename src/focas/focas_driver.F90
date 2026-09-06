@@ -246,18 +246,26 @@ module focas_driver
     ! build GPU Fock matrices via orbital_gradient first, then derive energy cheaply
     call orbital_gradient(int1,int2,den1,den2)
     e_total_ = compute_energy_tindex(fock_i_%occ, fock_a_%occ, q_, z_, int1, den1)
-    call diagonal_hessian(q_,z_,int2,den1,den2)
 
     initial_energy = e_total_
     last_energy    = e_total_
     converged      = 0
     iter           = 0
 
-    gk_ =  orbital_gradient_
-    dk_ = -orbital_gradient_
-    dk_ = dk_ / abs(orbital_hessian_)
+    ! A stationary initial point needs neither a Hessian nor an orbital step.
+    ! This lets a certified CASSCF macrocycle terminate without changing the
+    ! Hamiltonian after its final SDP solve. max_iter=0 retains the explicit
+    ! gradient-only evaluation used by the legacy final-polish path.
+    if ( max_iter > 0 ) then
+      if ( grad_norm_ <= gradient_norm_tolerance ) then
+        converged = 1
+      else
+        call diagonal_hessian(q_,z_,int2,den1,den2)
+        gk_ =  orbital_gradient_
+        dk_ = -orbital_gradient_
+        dk_ = dk_ / abs(orbital_hessian_)
 
-    do
+        do
       ! store energy at initial point
       e_init = e_total_
        
@@ -488,14 +496,23 @@ module focas_driver
         dk_ = -sk_ + beta*dk_ + gamma*tk_
       end if
       
-    end do
+        end do
 
-    last_energy = e_total_
+        last_energy = e_total_
+      end if
+    else
+      last_energy = initial_energy
+      if ( grad_norm_ <= gradient_norm_tolerance ) converged = 1
+    end if
 
     orbopt_data(11) = real(iter,kind=wp)
     orbopt_data(12) = grad_norm_
     orbopt_data(13) = last_energy - initial_energy
     orbopt_data(14) = real(converged,kind=wp)
+    orbopt_data(25) = 0.0_wp
+    if ( rot_pair_%n_tot > 0 ) then
+      orbopt_data(25) = maxval(abs(orbital_gradient_))
+    end if
     if ( focas_step_memory_enabled() .and. iter > 0 ) then
       focas_step_memory_factor_ = max(min_step_size,min(1.0_wp,accepted_step_size))
       focas_step_memory_nirrep_ = nirrep_

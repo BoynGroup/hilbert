@@ -92,6 +92,28 @@ module focas_gradient
       integer(c_int), value       :: max_devices
     end function hilbert_focas_df_c1_cuda_fa_exchange
 
+    integer(c_int) function hilbert_focas_df_c1_cuda_gradient_all(nmo,ndoc,nact, &
+        nQ,int1,int2,den1,den2,fock_i_occ,fock_i_ext,fock_a_occ,fock_a_ext,q, &
+        q_chunk,max_devices) &
+        bind(C,name="hilbert_focas_df_c1_cuda_gradient_all")
+      import :: c_int, c_long_long, c_double
+      integer(c_int), value       :: nmo
+      integer(c_int), value       :: ndoc
+      integer(c_int), value       :: nact
+      integer(c_long_long), value :: nQ
+      real(c_double), intent(in)  :: int1(*)
+      real(c_double)              :: int2(*)
+      real(c_double), intent(in)  :: den1(*)
+      real(c_double), intent(in)  :: den2(*)
+      real(c_double)              :: fock_i_occ(*)
+      real(c_double)              :: fock_i_ext(*)
+      real(c_double)              :: fock_a_occ(*)
+      real(c_double)              :: fock_a_ext(*)
+      real(c_double)              :: q(*)
+      integer(c_int), value       :: q_chunk
+      integer(c_int), value       :: max_devices
+    end function hilbert_focas_df_c1_cuda_gradient_all
+
     integer(c_int) function hilbert_focas_df_c1_cuda_fi_coulomb(nmo,ndoc,nact,nQ, &
         int1,int2,fock_occ,fock_ext,q_chunk,max_devices) &
         bind(C,name="hilbert_focas_df_c1_cuda_fi_coulomb")
@@ -163,8 +185,37 @@ module focas_gradient
     real(wp), intent(inout) :: int2(:)
     type(fock_info) :: fock
     integer :: i
+    integer(c_int) :: cuda_status
+    logical :: fused_done
     real(wp), allocatable :: tq(:,:)
-   
+
+    ! Fused GPU path: Fi/Fa Coulomb, Fi/Fa exchange and Q share one sweep of the
+    ! DF tensor instead of five.  On any failure it reports and falls through to
+    ! the five-operator path below, which is unchanged.
+    fused_done = .false.
+    if ( use_c1_cuda_gradient_fused() ) then
+      cuda_status = hilbert_focas_df_c1_cuda_gradient_all( &
+           int(nmo_tot_,kind=c_int),int(ndoc_tot_,kind=c_int), &
+           int(nact_tot_,kind=c_int),int(df_vars_%nQ,kind=c_long_long), &
+           int1,int2,den1,den2, &
+           fock_i_%occ(1)%val(1,1),fock_i_%ext(1)%val(1), &
+           fock_a_%occ(1)%val(1,1),fock_a_%ext(1)%val(1), &
+           q_(1,1),0,int(focas_df_c1_cuda_num_gpus_,kind=c_int))
+      if ( cuda_status == 0 ) then
+        fused_done = .true.
+      else
+        if ( cuda_status == focas_cuda_session_fatal_status_ ) call abort_print(33)
+        call warn_cuda_fallback('fused gradient (C1)',cuda_status)
+      end if
+    end if
+
+    if ( fused_done ) then
+
+      call transpose_matrix(fock_i_)
+      call transpose_matrix(fock_a_)
+
+    else
+
     ! calculate inactive Fock matrix
     if ( df_vars_%use_df_teints == 0 ) then
        call compute_f_i(int1,int2)
@@ -190,6 +241,8 @@ module focas_gradient
       call compute_q(den2,int2)
     else
       call compute_q_df(den2,int2)
+    endif
+
     endif
 
     ! calculate auxiliary z matrix
@@ -271,6 +324,25 @@ module focas_gradient
 
     return
   end function use_c1_cuda_gradient_coulomb
+
+  !> The fused path replaces the five separate C1 gradient operators with a
+  !! single sweep of the DF tensor.  It requires every one of them to be
+  !! eligible, since it computes all five results together.  It is always used
+  !! when eligible; any failure reports and falls back to the separate
+  !! operators, so there is nothing to configure.
+  logical function use_c1_cuda_gradient_fused()
+    implicit none
+
+    use_c1_cuda_gradient_fused = .false.
+
+    if ( .not. use_c1_cuda_gradient_coulomb() ) return
+    if ( .not. use_c1_cuda_gradient_exchange() ) return
+    if ( .not. use_c1_cuda_gradient_q() ) return
+
+    use_c1_cuda_gradient_fused = .true.
+
+    return
+  end function use_c1_cuda_gradient_fused
 
   logical function use_c1_cuda_gradient_q()
     implicit none
@@ -782,6 +854,7 @@ module focas_gradient
            int2,den2,q_(1,1),0,int(focas_df_c1_cuda_num_gpus_,kind=c_int))
       if ( cuda_status == 0 ) return
       if ( cuda_status == focas_cuda_session_fatal_status_ ) call abort_print(33)
+      call warn_cuda_fallback('Q contraction (C1)',cuda_status)
     end if
 
     ! *********************************************************************
@@ -867,6 +940,7 @@ module focas_gradient
       end if
 
       if ( cuda_status == focas_cuda_session_fatal_status_ ) call abort_print(33)
+      call warn_cuda_fallback('Q contraction (sym)',cuda_status)
 
       deallocate(scaled_d2_sym,q_df_tmp,act_df_list,act_sym_l,act_class_l)
 
@@ -1193,6 +1267,7 @@ module focas_gradient
            0,int(focas_df_c1_cuda_num_gpus_,kind=c_int))
       if ( cuda_status == 0 ) return
       if ( cuda_status == focas_cuda_session_fatal_status_ ) call abort_print(33)
+      call warn_cuda_fallback('Fa exchange (C1)',cuda_status)
     end if
 
     ! *********************************************************************
@@ -1277,6 +1352,7 @@ module focas_gradient
       end if
 
       if ( cuda_status == focas_cuda_session_fatal_status_ ) call abort_print(33)
+      call warn_cuda_fallback('Fa exchange (sym)',cuda_status)
 
       deallocate(act_df_list,act_sym_l,act_class_l,den1_act,c_sym)
 
@@ -1599,6 +1675,7 @@ module focas_gradient
            0, int(focas_df_c1_cuda_num_gpus_,kind=c_int))
       if ( cuda_status == 0 ) return
       if ( cuda_status == focas_cuda_session_fatal_status_ ) call abort_print(33)
+      call warn_cuda_fallback('Fa Coulomb (C1)',cuda_status)
     end if
 
     ! *** Coulomb terms ***
@@ -2095,6 +2172,7 @@ module focas_gradient
            0, int(focas_df_c1_cuda_num_gpus_,kind=c_int))
       if ( cuda_status == 0 ) return
       if ( cuda_status == focas_cuda_session_fatal_status_ ) call abort_print(33)
+      call warn_cuda_fallback('Fi Coulomb (C1)',cuda_status)
     end if
 
     qint_%tuQ(1)%val(:,1) = 0.0_wp
@@ -2370,6 +2448,7 @@ module focas_gradient
            0,int(focas_df_c1_cuda_num_gpus_,kind=c_int))
       if ( cuda_status == 0 ) return
       if ( cuda_status == focas_cuda_session_fatal_status_ ) call abort_print(33)
+      call warn_cuda_fallback('Fi exchange (C1)',cuda_status)
     end if
 
     ! *********************************************************************
@@ -2437,6 +2516,7 @@ module focas_gradient
       end if
 
       if ( cuda_status == focas_cuda_session_fatal_status_ ) call abort_print(33)
+      call warn_cuda_fallback('Fi exchange (sym)',cuda_status)
 
       deallocate(doc_df_list,c_sym)
 

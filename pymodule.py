@@ -3556,6 +3556,11 @@ def _make_dqg_matrix_free_operator(meta, block_dims, n_primal, n_dual, device,
     raise ValueError(f"Unsupported matrix-free DQG operator '{operator}'.")
 
 
+def _gpu_admm_stagnation_can_terminate(require_gap_convergence):
+    """Whether energy stagnation may replace explicit gap convergence."""
+    return not bool(require_gap_convergence)
+
+
 def gpu_admm_solve(c, b, block_dims, rows, cols, vals, progress_monitor_py,
                    x_init, y_init, z_init, mu_init,
                    maxiter, sdp_error_convergence, sdp_objective_convergence,
@@ -4191,6 +4196,15 @@ def gpu_admm_solve(c, b, block_dims, rows, cols, vals, progress_monitor_py,
     if stagnation_window < 2:
         stagnation_window = 2
 
+    # Per-call CASSCF controls. These are deliberately transient: the C++
+    # macrocycle driver supplies them for each changed Hamiltonian/final-polish
+    # solve without mutating the solver-wide production tolerances.
+    require_gap_convergence = bool(
+        _accel_get("require_gap_convergence", 0)
+    )
+    hamiltonian_changed = bool(_accel_get("hamiltonian_changed", 0))
+    entry_diagnostics = bool(_accel_get("entry_diagnostics", 0))
+
     def effective_gap_tol(obj_primal, obj_dual):
         tol = float(sdp_objective_convergence)
         if gap_relative and gap_relative_tol > 0.0:
@@ -4204,10 +4218,25 @@ def gpu_admm_solve(c, b, block_dims, rows, cols, vals, progress_monitor_py,
             accel_msgs.append(f"over-relaxation alpha={admm_relaxation:.3f}")
         if gap_relative and gap_relative_tol > 0.0:
             accel_msgs.append(f"relative gap tol={gap_relative_tol:.2e}")
-        accel_msgs.append(
-            f"energy-stagnation stop(window={stagnation_window}, "
-            f"tol={stagnation_energy_tol:.2e}, always on)"
-        )
+        if _gpu_admm_stagnation_can_terminate(require_gap_convergence):
+            accel_msgs.append(
+                f"energy-stagnation stop(window={stagnation_window}, "
+                f"tol={stagnation_energy_tol:.2e})"
+            )
+        else:
+            accel_msgs.append(
+                "explicit gap convergence required; energy stagnation "
+                "cannot terminate this solve"
+            )
+        if require_gap_convergence:
+            accel_msgs.append(
+                f"raw residual target={sdp_error_convergence:.2e}; "
+                f"absolute gap target={sdp_objective_convergence:.2e}"
+            )
+        if hamiltonian_changed:
+            accel_msgs.append(
+                "changed-H warm start(carried primal/dual/slack state)"
+            )
         print(
             "  ==> GPU-ADMM acceleration: " + "; ".join(accel_msgs) + ".",
             flush=True,
@@ -5372,6 +5401,50 @@ def gpu_admm_solve(c, b, block_dims, rows, cols, vals, progress_monitor_py,
                         z_s[offset:offset+block_size] = z_blocks[idx]
                     update_psd_dim_timing(dim, dtype_label, dim_elapsed, len(groups))
 
+        def current_dual_error():
+            if primal_sharded:
+                return _dual_error_store()
+            dual_error_vector = torch.empty_like(c_s)
+            _atu_y_to_full(dual_error_vector)
+            dual_error_vector.sub_(c_s)
+            dual_error_vector.add_(z_s)
+            value = float(torch.linalg.norm(dual_error_vector))
+            del dual_error_vector
+            return value
+
+        def convergence_reached(primal_value, dual_value, gap_value,
+                                objective_primal_value,
+                                objective_dual_value, multiplier=1.0):
+            gap_tolerance = effective_gap_tol(
+                objective_primal_value, objective_dual_value)
+            return (
+                primal_value < sdp_error_convergence * multiplier and
+                dual_value < sdp_error_convergence * multiplier and
+                gap_value < gap_tolerance * multiplier
+            )
+
+        # Measure the true carried state before the first ADMM update. Previous
+        # profiling sampled only after that update and therefore hid the warm-
+        # start damage caused by changing c at an orbital rotation.
+        timer = timer_start()
+        primal_error = _primal_residual()
+        dual_error = current_dual_error()
+        if primal_sharded:
+            objective_primal = _primal_objective()
+        else:
+            objective_primal = float(torch.dot(c_s, x_s))
+        objective_dual = _dual_objective()
+        primal_dual_objective_gap = abs(objective_primal - objective_dual)
+
+        if entry_diagnostics and print_level > 0:
+            print(
+                "  ==> GPU-ADMM entry: "
+                f"raw_rp={primal_error:.6e} raw_rd={dual_error:.6e} "
+                f"gap={primal_dual_objective_gap:.6e} mu={mu:.6e}",
+                flush=True,
+            )
+        timer_stop("initial_residual", timer)
+
         # Energy-stagnation-stop state (reset per stage).
         from collections import deque
         energy_history = deque(maxlen=stagnation_window)
@@ -5405,21 +5478,6 @@ def gpu_admm_solve(c, b, block_dims, rows, cols, vals, progress_monitor_py,
                 cg_rhs.add_(tmp_dual, alpha=-mu)
                 del tmp_dual
             timer_stop("cg_rhs", timer)
-
-            if local_iter == 0:
-                timer = timer_start()
-                if primal_sharded:
-                    dual_error = _dual_error_store()
-                else:
-                    dual_err_vec = torch.empty_like(c_s)
-                    _atu_y_to_full(dual_err_vec)
-                    dual_err_vec.sub_(c_s)
-                    dual_err_vec.add_(z_s)
-                    dual_error = float(torch.linalg.norm(dual_err_vec))
-                    del dual_err_vec
-
-                primal_error = _primal_residual()
-                timer_stop("initial_residual", timer)
 
             if dynamic_cg_convergence:
                 if local_iter == 0:
@@ -5512,40 +5570,44 @@ def gpu_admm_solve(c, b, block_dims, rows, cols, vals, progress_monitor_py,
             bpsdp_iter += 1
             local_iter += 1
 
-            mu_before = mu
             if mu_update_frequency > 0 and bpsdp_iter % mu_update_frequency == 0:
                 mu = adaptive_mu_update(
-                    mu, primal_error, dual_error, primal_dual_objective_gap
+                    mu, primal_error, dual_error,
+                    primal_dual_objective_gap
                 )
 
-            gap_tol_i = effective_gap_tol(objective_primal, objective_dual)
-            if (primal_error < sdp_error_convergence * coarse_mult and
-                dual_error < sdp_error_convergence * coarse_mult and
-                primal_dual_objective_gap < gap_tol_i * coarse_mult):
+            if convergence_reached(
+                    primal_error, dual_error, primal_dual_objective_gap,
+                    objective_primal, objective_dual, coarse_mult):
                 break
 
-            # Always-on energy-stagnation stop: once feasibility is met and the
-            # variational primal energy has been flat to tol across the window,
-            # the energy is converged even if the duality-gap criterion is still
-            # moving in its very slow linear tail.
-            energy_history.append(objective_primal)
-            if (coarse_mult <= 1.0 and
-                    len(energy_history) >= stagnation_window and
-                    primal_error < sdp_error_convergence and
-                    dual_error < sdp_error_convergence):
-                energy_span = max(energy_history) - min(energy_history)
-                if energy_span < stagnation_energy_tol:
-                    stagnation_triggered = True
-                    if print_level > 0:
-                        print(
-                            f"  ==> GPU-ADMM: energy-stagnation stop at iter "
-                            f"{bpsdp_iter}: feasibility met (eps_p={primal_error:.2e}, "
-                            f"eps_d={dual_error:.2e}) and E(p) flat to "
-                            f"{energy_span:.2e} < {stagnation_energy_tol:.2e} over "
-                            f"{stagnation_window} iters (gap={primal_dual_objective_gap:.2e}).",
-                            flush=True,
-                        )
-                    break
+            # Standalone/legacy solves may use a flat variational energy as an
+            # alternative convergence certificate. Adaptive CASSCF explicitly
+            # requires its absolute gap target, so stagnation must never bypass
+            # that test.
+            if _gpu_admm_stagnation_can_terminate(require_gap_convergence):
+                energy_history.append(objective_primal)
+                if (coarse_mult <= 1.0 and
+                        len(energy_history) >= stagnation_window and
+                        primal_error < sdp_error_convergence and
+                        dual_error < sdp_error_convergence):
+                    energy_span = max(energy_history) - min(energy_history)
+                    energy_span_metric = energy_span
+                    if energy_span_metric < stagnation_energy_tol:
+                        stagnation_triggered = True
+                        if print_level > 0:
+                            print(
+                                f"  ==> GPU-ADMM: energy-stagnation stop at iter "
+                                f"{bpsdp_iter}: feasibility met "
+                                f"(eps_p={primal_error:.2e}, "
+                                f"eps_d={dual_error:.2e}) and E(p) flat to "
+                                f"{energy_span_metric:.2e} (absolute) < "
+                                f"{stagnation_energy_tol:.2e} over "
+                                f"{stagnation_window} iters "
+                                f"(gap={primal_dual_objective_gap:.2e}).",
+                                flush=True,
+                            )
+                        break
 
         # Reassemble the full solution from shards/store and propagate to the
         # double masters. In the sharded path do this one vector at a time
@@ -5611,16 +5673,29 @@ def gpu_admm_solve(c, b, block_dims, rows, cols, vals, progress_monitor_py,
     z_opt = copy_back_to_host_array(z_t, z_init, "z")
     timer_stop("host_copy", timer)
 
-    # The always-on energy-stagnation stop certifies the variational energy has
-    # converged to target even if the gap criterion was still moving, so treat
-    # it as converged. Otherwise apply the gap tolerance.
+    # Legacy solves may accept energy stagnation as an alternative certificate.
+    # CASSCF-controlled solves always require the configured gap criterion.
     converged = (
-        stagnation_triggered
-        or (primal_error < sdp_error_convergence and
-            dual_error < sdp_error_convergence and
-            primal_dual_objective_gap <
-            effective_gap_tol(objective_primal, objective_dual))
+        (
+            stagnation_triggered and
+            _gpu_admm_stagnation_can_terminate(require_gap_convergence)
+        )
+        or convergence_reached(
+            primal_error, dual_error, primal_dual_objective_gap,
+            objective_primal, objective_dual)
     )
+
+    if require_gap_convergence and print_level > 0:
+        print(
+            "  ==> GPU-ADMM exit certificate: "
+            f"raw_rp={primal_error:.6e} "
+            f"raw_rd={dual_error:.6e} "
+            f"abs_gap={primal_dual_objective_gap:.6e} "
+            f"target_raw_residual={sdp_error_convergence:.6e} "
+            f"target_absolute_gap={sdp_objective_convergence:.6e} "
+            f"converged={'true' if converged else 'false'}",
+            flush=True,
+        )
 
     if profile_timing and print_level > 0:
         total_elapsed = time.perf_counter() - solve_wall_start

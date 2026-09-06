@@ -122,6 +122,8 @@ transform if the helper cannot be loaded or the problem is incompatible.
 
 | Option | Default | Description |
 | --- | ---: | --- |
+| `CASSCF_ADAPTIVE_SDP` | `false` | Replace fixed `ORBOPT_FREQUENCY` chunks with an adaptive GPU-ADMM CASSCF accuracy ladder. Explicitly setting `ORBOPT_FREQUENCY` overwrites this. |
+| `CASSCF_ENERGY_CONVERGENCE` | `1.0e-5` | Total-energy convergence threshold for the adaptive CASSCF path. Two consecutive certified macrocycles must pass before the final user-accuracy SDP solve. |
 | `GPU_ADMM_RELAXATION` | `1.0` | ADMM over-relaxation factor; `1.0` disables over-relaxation. |
 | `GPU_ADMM_GAP_RELATIVE` | `false` | Add a relative duality-gap convergence target. |
 | `GPU_ADMM_GAP_RELATIVE_TOL` | `0.0` | Relative gap tolerance when enabled. |

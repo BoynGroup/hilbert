@@ -37,6 +37,11 @@ using QFn = int (*)(int, int, int, long long, const double *, const double *,
                     double *, int, int);
 using SymQFn = int (*)(int, int, int, long long, const double *,
                        const double *, const int *, double *, int, int);
+// Fused C1 gradient: Fi/Fa Coulomb, Fi/Fa exchange and Q in one sweep.
+using GradientAllFn = int (*)(int, int, int, long long, const double *,
+                              const double *, const double *, const double *,
+                              double *, double *, double *, double *, double *,
+                              int, int);
 
 std::mutex load_mutex;
 void *jit_handle = nullptr;
@@ -53,6 +58,10 @@ FiCoulombFn jit_fi_coulomb = nullptr;
 FaCoulombFn jit_fa_coulomb = nullptr;
 QFn jit_q = nullptr;
 SymQFn jit_sym_q = nullptr;
+// Optional: absent when hilbert.so is newer than the .cu it JIT-compiles.
+// A null pointer degrades to the five-operator path instead of disabling the
+// whole CUDA FOCAS layer.
+GradientAllFn jit_gradient_all = nullptr;
 int jit_load_status = 0;
 
 bool file_exists(const std::string &path) {
@@ -373,6 +382,8 @@ int ensure_loaded() {
   void *symbol_sym_q = dlsym(jit_handle, "hilbert_focas_df_sym_cuda_q");
   void *symbol_sym_fa =
       dlsym(jit_handle, "hilbert_focas_df_sym_cuda_fa_exchange");
+  void *symbol_gradient_all =
+      dlsym(jit_handle, "hilbert_focas_df_c1_cuda_gradient_all");
   if (symbol_transform == nullptr || symbol_low_rank_transform == nullptr ||
       symbol_session_begin == nullptr ||
       symbol_session_end == nullptr || symbol_ao_to_mo == nullptr ||
@@ -398,6 +409,7 @@ int ensure_loaded() {
   jit_q = reinterpret_cast<QFn>(symbol_q);
   jit_sym_q = reinterpret_cast<SymQFn>(symbol_sym_q);
   jit_sym_fa_exchange = reinterpret_cast<SymFaExchangeFn>(symbol_sym_fa);
+  jit_gradient_all = reinterpret_cast<GradientAllFn>(symbol_gradient_all);
   return 0;
 }
 
@@ -509,6 +521,23 @@ extern "C" int hilbert_focas_df_c1_cuda_q(
   return dispatch([&]() {
     return jit_q(nmo, ndoc, nact, nQ, int2, den2, q_out, q_chunk,
                  max_devices);
+  });
+}
+
+extern "C" int hilbert_focas_df_c1_cuda_gradient_all(
+    int nmo, int ndoc, int nact, long long nQ, const double *int1,
+    const double *int2, const double *den1, const double *den2,
+    double *fock_i_occ, double *fock_i_ext, double *fock_a_occ,
+    double *fock_a_ext, double *q_out, int q_chunk, int max_devices) {
+  return dispatch([&]() {
+    // Older JIT sources do not export the fused entry point; report a distinct
+    // status so the caller falls back to the five separate operators.
+    if (jit_gradient_all == nullptr) {
+      return 342;
+    }
+    return jit_gradient_all(nmo, ndoc, nact, nQ, int1, int2, den1, den2,
+                            fock_i_occ, fock_i_ext, fock_a_occ, fock_a_ext,
+                            q_out, q_chunk, max_devices);
   });
 }
 

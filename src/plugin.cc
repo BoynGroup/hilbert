@@ -397,6 +397,24 @@ extern "C" PSI_API int read_options(std::string name, Options &options) {
     /*- SDP solver -*/
     options.add_str("SDP_SOLVER", "BPSDP", "BPSDP RRSDP CVXPY GPU_ADMM");
 
+    /*- Replace fixed ORBOPT_FREQUENCY chunks with step-wise ladder GPU-ADMM
+    CASSCF path. A scalar accuracy target starts at 5e-2 and halves continuously
+    to the configured production residual and gap tolerances. The raw-residual
+    target is capped at 1e-2. Intermediate promotion requires two consecutive
+    certified macrocycles whose total CASSCF energy changes are below
+    max(CASSCF_ENERGY_CONVERGENCE, 0.1 times the current gap). Two consecutive
+    user-level energy passes freeze the orbitals and request one final solve at
+    the configured production residual and gap targets. The final polished
+    energy controls adaptive convergence. Explicitly setting ORBOPT_FREQUENCY
+    always selects the legacy fixed-frequency path and overrides this option.
+    -*/
+    options.add_bool("CASSCF_ADAPTIVE_SDP", false);
+
+    /*- Required total-energy change for adaptive CASSCF convergence. Two
+    consecutive certified macrocycles must pass this threshold before the
+    final user-accuracy SDP solve. -*/
+    options.add_double("CASSCF_ENERGY_CONVERGENCE", 1.0e-5);
+
     /*- Validate GPU-ADMM sparse A against callback matvecs. For
      * debugging/development only! -*/
     options.add_bool("GPU_ADMM_VALIDATE_A", false);

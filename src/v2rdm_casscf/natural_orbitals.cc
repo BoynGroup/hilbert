@@ -49,9 +49,10 @@ void v2RDMSolver::ComputeNaturalOrbitals() {
         outfile->Printf("    ==> Warning <==\n");
         outfile->Printf("\n");
         outfile->Printf("        The natural orbitals computed here for EKT and FCIDUMP are\n");
-        outfile->Printf("        the natural orbitals of the spin-free 1-RDM. On the other\n");
-        outfile->Printf("        hand, the natural orbital occupation numbers printed below\n");
-        outfile->Printf("        correspond to natural spin orbitals.\n");
+        outfile->Printf("        the natural orbitals of the spin-free 1-RDM.  With NAT_ORBS\n");
+        outfile->Printf("        the occupations of that spin-free 1-RDM are printed below,\n");
+        outfile->Printf("        followed by those of the natural spin orbitals, which are a\n");
+        outfile->Printf("        different set whenever the alpha and beta 1-RDMs differ.\n");
         outfile->Printf("\n");
 
     }
@@ -591,6 +592,8 @@ void v2RDMSolver::PrintNaturalOrbitalOccupations() {
         int_nmopi[h] = nmopi_[h];
     }
 
+    // Build the alpha and beta 1-RDMs in the full MO space.  Frozen and
+    // restricted-core orbitals are singly occupied per spin.
     SharedMatrix Da (new Matrix(nirrep_,int_nmopi,int_nmopi));
     SharedMatrix eigveca (new Matrix(nirrep_,int_nmopi,int_nmopi));
     std::shared_ptr<Vector> eigvala = std::make_shared<Vector>("Natural Orbital Occupation Numbers (alpha)",nmopi_);
@@ -605,9 +608,6 @@ void v2RDMSolver::PrintNaturalOrbitalOccupations() {
             }
         }
     }
-    SharedMatrix saveda ( new Matrix(Da) );
-    Da->diagonalize(eigveca,eigvala,descending);
-    eigvala->print();
 
     SharedMatrix Db (new Matrix(nirrep_,int_nmopi,int_nmopi));
     SharedMatrix eigvecb (new Matrix(nirrep_,int_nmopi,int_nmopi));
@@ -622,6 +622,34 @@ void v2RDMSolver::PrintNaturalOrbitalOccupations() {
             }
         }
     }
+
+    // With NAT_ORBS the orbitals written to the molden/FCIDUMP are those of the
+    // spin-free 1-RDM D = Da + Db, so report its occupations (one spatial set,
+    // range 0-2) as well.  They are printed first, since they are the ones that
+    // correspond to the orbitals actually being written.  The per-spin
+    // occupations below are of the natural SPIN orbitals and remain a different
+    // set whenever Da != Db.
+    if ( options_.get_bool("NAT_ORBS") ) {
+
+        SharedMatrix Dtot (new Matrix(Da));
+        Dtot->add(Db);
+        SharedMatrix eigvectot (new Matrix(nirrep_,int_nmopi,int_nmopi));
+        std::shared_ptr<Vector> eigvaltot = std::make_shared<Vector>("Natural Orbital Occupation Numbers (spin-free)",nmopi_);
+        Dtot->diagonalize(eigvectot,eigvaltot,descending);
+
+        outfile->Printf("\n");
+        outfile->Printf("    Occupation numbers of the spin-free 1-RDM (one spatial set, 0-2).\n");
+        outfile->Printf("    These correspond to the orbitals written to the molden file.\n");
+        eigvaltot->print();
+
+        outfile->Printf("\n");
+        outfile->Printf("    Occupation numbers of the natural spin orbitals (per spin, 0-1).\n");
+
+    }
+
+    Da->diagonalize(eigveca,eigvala,descending);
+    eigvala->print();
+
     Db->diagonalize(eigvecb,eigvalb,descending);
     eigvalb->print();
 
